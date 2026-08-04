@@ -1,0 +1,361 @@
+"""DMRGT Phase 1 — data acquisition, target construction, feature caching.
+
+This is the single entry point for everything that builds the local cache:
+
+  python data.py --download     # Step 1 — raw prices (idempotent)
+  python data.py --targets      # Step 2 — next-day excess returns
+  python data.py --features     # Step 4 — 8 raw, unscaled features
+
+The target and features steps both depend on the prices step having
+already produced cache/prices.parquet. They are NOT idempotent in the
+same sense — re-running them overwrites their respective Parquet files.
+The prices step IS strictly idempotent (same inputs → same hash).
+
+Implementation note: the spec puts target and features in separate files
+(target in data.py per §4, features in features.py per §6). We follow
+that, but expose them as CLI subcommands of data.py so a single script
+drives the whole local pipeline.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import sys
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import yaml
+
+import paths
+
+# features.py is introduced in Step E. The import lives inside the
+# --features branch (where it is actually used) so that Pylance and
+# other static analysers don't flag an unresolved import before the
+# module exists, and so that --download and --targets have zero
+# dependency on features.py.
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Config
+# ──────────────────────────────────────────────────────────────────────
+
+def load_config(path: str = "configs.yaml") -> dict:
+    with open(path) as f:
+        return yaml.safe_load(f)
+
+
+def all_tickers(cfg: dict) -> list[str]:
+    """The 20 universe tickers plus the 2 global series."""
+    return list(cfg["universe"]["tickers"]) + list(cfg["universe"]["global_series"])
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Hashing
+# ──────────────────────────────────────────────────────────────────────
+
+def sha256_of_file(path: Path) -> str:
+    """SHA-256 hex digest of a file's contents."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def write_hashes(prices_path: Path, hashes_path: Path) -> None:
+    """Write a single hashes.json containing the SHA-256 of every cache
+    artefact currently on disk. Kaggle notebook re-verifies these."""
+    import json
+    hashes = {}
+    for p in [prices_path, paths.FEATURES, paths.TARGETS]:
+        if p.exists():
+            hashes[p.name] = sha256_of_file(p)
+    hashes_path.write_text(json.dumps(hashes, indent=2, sort_keys=True))
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Step 1 — Download prices
+# ──────────────────────────────────────────────────────────────────────
+
+def download_prices(cfg: dict) -> pd.DataFrame:
+    """Download OHLCV for all tickers + global series, align to a single
+    common trading-day calendar, cache as long-format Parquet, record hash.
+
+    Idempotent: if prices.parquet already exists and its date range covers
+    the configured window (with a small grace window for market holidays)
+    and the ticker set matches, the cached file is returned without
+    re-downloading. The yfinance API is not perfectly deterministic across
+    calls (minor float drift on adjusted prices), so we treat the cache
+    as the source of truth and never re-download unless it is stale.
+    """
+    tickers = all_tickers(cfg)
+    start = cfg["universe"]["start_date"]
+    end = cfg["universe"]["end_date"]
+
+    # ── idempotency check ────────────────────────────────────────────
+    if paths.PRICES.exists():
+        cached = pd.read_parquet(paths.PRICES)
+        cached_hash = sha256_of_file(paths.PRICES)
+        cached_min = cached["date"].min()
+        cached_max = cached["date"].max()
+        # Allow up to 5 trading days of slack at each end so market
+        # holidays (e.g. 2015-01-01, 2024-12-31) don't trigger re-downloads.
+        slack = pd.tseries.offsets.BDay(5)
+        start_deadline = pd.Timestamp(start) + slack
+        end_deadline = pd.Timestamp(end) - slack
+        covers_window = (cached_min <= start_deadline) and (cached_max >= end_deadline)
+        tickers_match = set(cached["ticker"].unique()) == set(tickers)
+        if covers_window and tickers_match:
+            print(f"[data] cache hit: {paths.PRICES}")
+            print(f"[data] sha256: {cached_hash}")
+            print(f"[data] rows: {len(cached):,}  tickers: {cached['ticker'].nunique()}")
+            print(f"[data] date range: {cached_min.date()} → {cached_max.date()}")
+            return cached
+        print(f"[data] cache exists but stale — re-downloading "
+              f"(covers_window={covers_window}, tickers_match={tickers_match})")
+
+    # ── download ─────────────────────────────────────────────────────
+    import yfinance as yf
+    print(f"[data] downloading {len(tickers)} series from {start} → {end}")
+
+    frames = []
+    for t in tickers:
+        # auto_adjust=True folds splits/dividends into the close so
+        # the price series is what we actually want for returns.
+        df = yf.download(
+            t,
+            start=start,
+            end=end,
+            auto_adjust=True,
+            progress=False,
+            actions=False,
+        )
+        if df.empty:
+            raise RuntimeError(f"yfinance returned no data for {t!r}")
+        # yfinance sometimes returns a MultiIndex columns frame for a
+        # single ticker; flatten to plain columns.
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = [c[0].lower() for c in df.columns]
+        else:
+            df.columns = [c.lower() for c in df.columns]
+        # yfinance 0.2.x returns "price" instead of "close" sometimes;
+        # guard against that.
+        rename = {}
+        for c in df.columns:
+            if c == "price":
+                rename[c] = "close"
+        if rename:
+            df = df.rename(columns=rename)
+        df = df.reset_index()
+        # yfinance uses "Date" or "Datetime" depending on version.
+        date_col = "Date" if "Date" in df.columns else (
+            "Datetime" if "Datetime" in df.columns else df.columns[0]
+        )
+        df = df.rename(columns={date_col: "date"})
+        df["date"] = pd.to_datetime(df["date"]).dt.tz_localize(None)
+        df["ticker"] = t
+        # Keep only the columns we need.
+        keep = ["date", "ticker", "open", "high", "low", "close", "volume"]
+        df = df[[c for c in keep if c in df.columns]]
+        if "volume" not in df.columns:
+            df["volume"] = np.nan
+        frames.append(df)
+
+    raw = pd.concat(frames, ignore_index=True)
+    raw = raw.sort_values(["ticker", "date"]).reset_index(drop=True)
+
+    # ── calendar alignment ──────────────────────────────────────────
+    # Master calendar = intersection of all tickers' date indices.
+    # For each ticker we drop dates where ANY other ticker is missing.
+    # This guarantees every ticker has the same number of rows and
+    # identical date indices.
+    per_ticker_dates = {t: set(d["date"]) for t, d in raw.groupby("ticker")}
+    common_dates = set.intersection(*per_ticker_dates.values()) \
+        if per_ticker_dates else set()
+    if not common_dates:
+        raise RuntimeError("No common trading dates across all tickers")
+    print(f"[data] master calendar: {len(common_dates)} trading days")
+
+    aligned = (raw[raw["date"].isin(common_dates)]
+               .sort_values(["date", "ticker"])
+               .reset_index(drop=True))
+
+    # ── validation ──────────────────────────────────────────────────
+    counts = aligned.groupby("ticker").size()
+    assert counts.nunique() == 1, (
+        f"Calendar alignment failed — tickers have differing row counts: "
+        f"{counts.to_dict()}"
+    )
+    n_dates = int(counts.iloc[0])
+    assert aligned["date"].is_unique == False or aligned.duplicated(
+        subset=["date", "ticker"]).sum() == 0, "duplicate (date, ticker) rows"
+    assert aligned.isna().sum().sum() == 0, (
+        f"NaNs present after alignment:\n{aligned.isna().sum()}"
+    )
+    # Plausibility: ~252 trading days per calendar year over 2015-2024
+    # is ~2510 days, but the intersection of all 22 series is a bit
+    # smaller. Anything in [1500, 2600] is plausible.
+    assert 1500 <= n_dates <= 2600, f"Implausible row count per ticker: {n_dates}"
+
+    # ── save ────────────────────────────────────────────────────────
+    aligned.to_parquet(paths.PRICES, index=False)
+
+    # ── summary table ───────────────────────────────────────────────
+    print("\n[data] validation summary:")
+    summary_rows = []
+    sectors = _sector_lookup(cfg)
+    for t in tickers:
+        sub = aligned[aligned["ticker"] == t]
+        summary_rows.append({
+            "ticker": t,
+            "sector": sectors.get(t, "global"),
+            "first": str(sub["date"].min().date()),
+            "last": str(sub["date"].max().date()),
+            "rows": len(sub),
+            "NaNs": int(sub.isna().sum().sum()),
+        })
+    summary = pd.DataFrame(summary_rows)
+    print(summary.to_string(index=False))
+
+    h = sha256_of_file(paths.PRICES)
+    print(f"\n[data] wrote {paths.PRICES}  sha256={h}")
+    # Also write a single-line .sha256 sidecar (handy for shell checks).
+    (paths.CACHE_DIR / "prices.sha256").write_text(h + "\n")
+
+    return aligned
+
+
+def _sector_lookup(_cfg: dict) -> dict[str, str]:  # noqa: ARG001
+    """Map ticker → GICS sector. Hard-coded here because the spec
+    requires the assignment to be deliberate and documented; the
+    canonical list also lives at the top of configs.yaml. The config
+    argument is kept for API consistency with the other helpers in
+    this file (every step accepts cfg) and for future per-ticker
+    overrides from configs.yaml."""
+    return {
+        "AAPL": "Information Technology", "MSFT": "Information Technology",
+        "JPM":  "Financials",             "BRK-B": "Financials", "GS": "Financials",
+        "JNJ":  "Health Care",            "PFE":   "Health Care", "UNH": "Health Care",
+        "XOM":  "Energy",                 "CVX":   "Energy",
+        "AMZN": "Consumer Discretionary", "HD":    "Consumer Discretionary",
+        "NKE":  "Consumer Discretionary",
+        "PG":   "Consumer Staples",       "KO":    "Consumer Staples",
+        "HON":  "Industrials",            "CAT":   "Industrials", "BA": "Industrials",
+        "NEE":  "Utilities",              "DUK":   "Utilities",
+        "^GSPC": "global", "^VIX": "global",
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Step 2 — Target construction
+# ──────────────────────────────────────────────────────────────────────
+
+def build_targets(prices: pd.DataFrame, cfg: dict | None = None) -> pd.DataFrame:
+    """Next-day excess return per (date, ticker).
+
+        excess_return[stock, t] = daily_return[stock, t+1]
+                                  - mean(daily_return[all stocks, t+1])
+
+    The label at date t is the excess return realised on the *next*
+    trading day. The final row (last date) has no label and is dropped.
+
+    The "universe" mean is computed over the 20 stock tickers only —
+    the two global series (^GSPC, ^VIX) are features (7 and 8) applied
+    identically to every stock, not part of the cross-sectional mean.
+    """
+    # Resolve which tickers belong to the universe (20) vs the global
+    # series (^GSPC, ^VIX). When cfg is provided we use the configured
+    # ticker list; otherwise we infer "global" by the leading caret.
+    if cfg is not None:
+        universe_tickers = list(cfg["universe"]["tickers"])
+    else:
+        universe_tickers = [t for t in prices["ticker"].unique() if not t.startswith("^")]
+
+    # 1) daily returns per ticker
+    px = prices.pivot(index="date", columns="ticker", values="close").sort_index()
+    rets = px.pct_change()  # row t = return from t-1 to t
+
+    # 2) cross-sectional mean return per date — universe only, NOT globals
+    universe = rets[universe_tickers]
+    mean_ret = universe.mean(axis=1)
+
+    # 3) excess return, then SHIFT so label at date t = excess at t+1
+    excess = universe.sub(mean_ret, axis=0)
+    # After this, excess.loc[date, ticker] = return[t] - mean[t].
+    # We want the label at date t to describe what happens on t+1:
+    # label[t] = excess[t+1]. Use shift(-1).
+    labels = excess.shift(-1)
+
+    # 4) last row has no label; drop it explicitly.
+    n_before = len(labels)
+    labels = labels.dropna(how="all")
+    n_after = len(labels)
+    print(f"[data] targets: dropped {n_before - n_after} row(s) with no t+1 label")
+
+    # 5) reshape to long
+    long = (labels.stack(future_stack=True)
+                  .rename("excess_return")
+                  .reset_index()
+                  .rename(columns={"level_1": "ticker"}))
+    long = long[["date", "ticker", "excess_return"]]
+    return long
+
+
+# ──────────────────────────────────────────────────────────────────────
+# CLI
+# ──────────────────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(description="DMRGT Phase 1 data pipeline")
+    g = parser.add_mutually_exclusive_group(required=True)
+    g.add_argument("--download", action="store_true", help="Step 1: download + cache prices")
+    g.add_argument("--targets",  action="store_true", help="Step 2: build targets.parquet")
+    g.add_argument("--features", action="store_true", help="Step 4: build features.parquet (Step E)")
+    args = parser.parse_args()
+
+    cfg = load_config()
+
+    if args.download:
+        download_prices(cfg)
+        # Update hashes.json so it reflects the new prices file even if
+        # targets/features don't exist yet.
+        write_hashes(paths.PRICES, paths.HASHES_JSON)
+        return
+
+    if args.targets:
+        if not paths.PRICES.exists():
+            print("[data] prices.parquet missing — run --download first", file=sys.stderr)
+            sys.exit(1)
+        prices = pd.read_parquet(paths.PRICES)
+        targets = build_targets(prices, cfg)
+        targets.to_parquet(paths.TARGETS, index=False)
+        print(f"[data] wrote {paths.TARGETS}  rows={len(targets):,}")
+        write_hashes(paths.PRICES, paths.HASHES_JSON)
+        return
+
+    if args.features:
+        if not paths.PRICES.exists():
+            print("[data] prices.parquet missing — run --download first", file=sys.stderr)
+            sys.exit(1)
+        # Lazy import — features.py is introduced in Step E. Importing
+        # here keeps --download / --targets independent of features.py
+        # and silences the static-analyser warning about an unresolved
+        # top-level import.
+        try:
+            from features import build_features, FEATURE_COLUMNS
+        except ImportError:
+            print("[data] features.py not yet implemented (Step E)", file=sys.stderr)
+            sys.exit(1)
+        prices = pd.read_parquet(paths.PRICES)
+        features = build_features(prices, cfg)
+        features.to_parquet(paths.FEATURES, index=False)
+        print(f"[data] wrote {paths.FEATURES}  rows={len(features):,}")
+        print(f"[data] features: {FEATURE_COLUMNS}")
+        write_hashes(paths.PRICES, paths.HASHES_JSON)
+        return
+
+
+if __name__ == "__main__":
+    main()

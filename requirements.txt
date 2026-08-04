@@ -1,0 +1,12 @@
+pandas
+numpy
+pyarrow
+yfinance
+pandas-ta
+torch
+scipy
+vectorbt
+mlflow
+matplotlib
+pytest
+kaggle

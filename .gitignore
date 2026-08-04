@@ -1,0 +1,74 @@
+# ─── Local-only artefacts — never committed, never uploaded to git. ────
+#
+# cache/    : local Parquet outputs from data.py / features.py.
+#             Uploaded to Kaggle as the versioned `dmrgt-cache` dataset.
+# artifacts/: outputs downloaded from Kaggle runs (predictions, metrics,
+#             checkpoints, MLflow runs). Stays local.
+#
+# The directory *placeholders* (cache/.gitkeep, artifacts/.gitkeep) ARE
+# committed so the directories exist in the repo.
+
+# ── Virtual environment (recreate locally with `python -m venv .venv`) ─
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# ── Local data cache (Parquet, hashes, Kaggle dataset metadata) ───────
+cache/*.parquet
+cache/*.sha256
+cache/hashes.json
+cache/dataset-metadata.json
+cache/.kaggle/
+
+# ── Artifacts downloaded from Kaggle runs (predictions, metrics) ──────
+artifacts/*.parquet
+artifacts/*.json
+artifacts/*.csv
+artifacts/*.log
+artifacts/*.pt
+artifacts/*.pth
+artifacts/checkpoints/
+artifacts/mlruns/
+
+# ── Python ─────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+dist/
+build/
+.Python
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# ── Notebooks ─────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+profile_default/
+ipython_config.py
+
+# ── ML / data science extras ──────────────────────────────────────────
+*.h5
+*.hdf5
+*.pkl
+*.pickle
+
+# ── Editors / IDEs ────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ── Logs ──────────────────────────────────────────────────────────────
+*.log
+logs/
