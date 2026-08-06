@@ -1,19 +1,7 @@
-"""DMRGT Phase 1 — feature engineering (Step D / §6 of build spec).
+"""DMRGT Phase 1 — feature engineering (§6).
 
-Builds the 8 features listed in the spec, one at a time, and saves them
-to cache/features.parquet UNSCALED. Scaling is fitted per fold inside
-train.py (§7.2 of the spec) — never here, never in the cached Parquet.
-
-Each feature is verified by hand against the spec's sanity checks
-(distributions, ranges, cross-section equality for the global series).
-The verification notebook (notebooks/verification.ipynb) plots every
-feature; tests/test_features.py asserts the structural invariants.
-
-Critical design constraints (all from §1 + §6 of the spec):
-  • No future data may leak into a feature at date t. Every rolling
-    window ends at day t.
-  • Features are stored RAW. No scaler touches the cache.
-  • The warm-up period (~60 days) is dropped and the count is logged.
+Builds 8 features, saves UNSCALED to cache/features.parquet. Scaling is
+fitted per fold inside train.py. Every rolling window ends at day t.
 """
 
 from __future__ import annotations
@@ -40,12 +28,8 @@ FEATURE_COLUMNS: list[str] = [
 def _apply_per_ticker(wide_close: pd.DataFrame, fn, _: str | None = None,
                       wide_high: pd.DataFrame | None = None,
                       wide_low: pd.DataFrame | None = None) -> pd.DataFrame:
-    """Apply a single-ticker feature function to every column of a wide
-    price DataFrame and return a wide DataFrame with the same columns.
-
-    For features needing only close, ``wide_high``/``wide_low`` may be
-    None. For features needing high/low/close, pass all three.
-    """
+    """Apply fn to every column of wide_close. Pass wide_high/wide_low for
+    features needing them."""
     out = {}
     for col in wide_close.columns:
         s = wide_close[col]
@@ -123,30 +107,8 @@ def _f8_vix(vix_close: pd.Series) -> pd.Series:
 
 
 def build_features(prices: pd.DataFrame, cfg: dict) -> pd.DataFrame:
-    """Build the 8 features per ticker for the whole date range.
-
-    Parameters
-    ----------
-    prices : DataFrame
-        Long-format prices with columns
-        ``date | ticker | open | high | low | close | volume``.
-        Must include ^GSPC and ^VIX as tickers — they are the source
-        for features 7 and 8.
-    cfg : dict
-        The full configs.yaml dict. Reads:
-          - universe.tickers (the 20 stocks)
-          - universe.global_series (must contain ^GSPC and ^VIX)
-          - features.ma_period
-          - features.rsi_period
-          - features.atr_period
-          - features.volume_zscore_window
-
-    Returns
-    -------
-    DataFrame
-        Long format ``date | ticker | f1 ... f8``. First ~60 rows are
-        dropped (warm-up). The cache stores this RAW — no scaling.
-    """
+    """Build 8 features per ticker. Returns long-format date|ticker|f1..f8.
+    Warm-up rows (~60) are dropped. Features are RAW — no scaling."""
     universe = list(cfg["universe"]["tickers"])
     globals_ = list(cfg["universe"]["global_series"])
     if "^GSPC" not in globals_ or "^VIX" not in globals_:

@@ -1,32 +1,7 @@
-"""DMRGT Phase 1 — Transformer encoder model (§7.1 of build spec).
+"""DMRGT Phase 1 — Transformer encoder (§7.1).
 
-The model is intentionally small. Phase 1 is about honest measurement,
-not state-of-the-art accuracy; the graph is the expected value driver
-in Phase 2.
-
-Architecture (per spec §7.1):
-    Input  X = [n_stocks, lookback, n_features]
-      → Linear projection 8 → 64
-      → + sinusoidal positional encoding
-      → nn.TransformerEncoder: 2 layers, 4 heads, dropout 0.1,
-        causal mask
-      → Take final time step
-      → MLP head 64 → 32 → 1
-    Output [n_stocks] predicted excess returns
-
-Key design choices the spec is explicit about:
-  • One shared Transformer applied across all stocks. Same weights for
-    every ticker. We do not build per-stock models.
-  • Causal mask is mandatory, even though only the final time step is
-    read out. The mask is the architectural leakage guard — without
-    it, a position could attend to a future day.
-  • Positional encoding is required. Attention is order-blind without
-    it.
-  • The forward() interface matches ``baselines.random_model`` /
-    ``persistence_model``: ``forward(X) -> y_pred`` where X has shape
-    ``[n_stocks, lookback, n_features]`` and y_pred has shape
-    ``[n_stocks]``. This means the model drops into
-    ``eval.evaluate_fold`` unchanged.
+One shared Transformer across all stocks: 2 layers, 4 heads, causal mask,
+64-dim hidden. No graph, no R-GCN — temporal encoder only.
 """
 
 from __future__ import annotations
@@ -38,12 +13,7 @@ import torch.nn as nn
 
 
 class PositionalEncoding(nn.Module):
-    """Standard sinusoidal positional encoding (Vaswani et al. 2017).
-
-    Adds a fixed (non-learned) sinusoid of varying frequency to the
-    projected input. We register the pe buffer so it moves with the
-    module on .to(device) but does not get updated by the optimiser.
-    """
+    """Sinusoidal positional encoding (Vaswani et al. 2017)."""
 
     def __init__(self, d_model: int, max_len: int = 512) -> None:
         super().__init__()
@@ -64,24 +34,7 @@ class PositionalEncoding(nn.Module):
 
 
 class DMRGTPhase1(nn.Module):
-    """The Phase 1 Transformer. NO graph, NO R-GCN — temporal encoder only.
-
-    Parameters
-    ----------
-    n_features : int
-        Number of input features per (stock, time) cell. 8 for Phase 1.
-    d_model : int
-        Width of the Transformer. 64 per spec.
-    n_heads : int
-        Number of attention heads. 4 per spec.
-    n_layers : int
-        Number of TransformerEncoder layers. 2 per spec.
-    dim_ff : int
-        Feed-forward inner dimension. The spec doesn't fix this; we
-        use the conventional 4× d_model.
-    dropout : float
-        Dropout in the Transformer. 0.1 per spec.
-    """
+    """Phase 1 Transformer: temporal encoder only, no graph, no R-GCN."""
 
     def __init__(
         self,
@@ -123,22 +76,8 @@ class DMRGTPhase1(nn.Module):
         )
 
     def forward(self, X: torch.Tensor) -> torch.Tensor:
-        """Predict excess returns for one or more trading days across all stocks.
-
-        Parameters
-        ----------
-        X : torch.Tensor
-            Either shape ``[n_stocks, lookback, n_features]`` (single day)
-            or ``[batch, n_stocks, lookback, n_features]`` (batched days
-            for training). The same tensor is fed for every stock —
-            there is no per-stock embedding.
-
-        Returns
-        -------
-        torch.Tensor
-            Predicted excess returns, shape ``[n_stocks]`` (single day)
-            or ``[batch, n_stocks]`` (batched).
-        """
+        """Predict excess returns. X: [n_stocks, L, F] or [B, n_stocks, L, F].
+        Returns [n_stocks] or [B, n_stocks]."""
         # The single-day path is the eval-interface path (matches
         # ``baselines.random_model(X) -> y_pred``). The batched path
         # is for training efficiency.

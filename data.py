@@ -1,20 +1,8 @@
-"""DMRGT Phase 1 — data acquisition, target construction, feature caching.
+"""DMRGT Phase 1 — data pipeline.
 
-This is the single entry point for everything that builds the local cache:
-
-  python data.py --download     # Step 1 — raw prices (idempotent)
-  python data.py --targets      # Step 2 — next-day excess returns
-  python data.py --features     # Step 4 — 8 raw, unscaled features
-
-The target and features steps both depend on the prices step having
-already produced cache/prices.parquet. They are NOT idempotent in the
-same sense — re-running them overwrites their respective Parquet files.
-The prices step IS strictly idempotent (same inputs → same hash).
-
-Implementation note: the spec puts target and features in separate files
-(target in data.py per §4, features in features.py per §6). We follow
-that, but expose them as CLI subcommands of data.py so a single script
-drives the whole local pipeline.
+python data.py --download   # Step 1: raw prices (idempotent)
+python data.py --targets    # Step 2: next-day excess returns
+python data.py --features   # Step 4: 8 raw, unscaled features
 """
 
 from __future__ import annotations
@@ -37,9 +25,6 @@ import paths
 # dependency on features.py.
 
 
-# ──────────────────────────────────────────────────────────────────────
-# Config
-# ──────────────────────────────────────────────────────────────────────
 
 def load_config(path: str = "configs.yaml") -> dict:
     with open(path) as f:
@@ -51,9 +36,6 @@ def all_tickers(cfg: dict) -> list[str]:
     return list(cfg["universe"]["tickers"]) + list(cfg["universe"]["global_series"])
 
 
-# ──────────────────────────────────────────────────────────────────────
-# Hashing
-# ──────────────────────────────────────────────────────────────────────
 
 def sha256_of_file(path: Path) -> str:
     """SHA-256 hex digest of a file's contents."""
@@ -123,21 +105,10 @@ def _verify_hashes_complete(hashes_path: Path) -> None:
     )
 
 
-# ──────────────────────────────────────────────────────────────────────
-# Step 1 — Download prices
-# ──────────────────────────────────────────────────────────────────────
 
 def download_prices(cfg: dict) -> pd.DataFrame:
-    """Download OHLCV for all tickers + global series, align to a single
-    common trading-day calendar, cache as long-format Parquet, record hash.
-
-    Idempotent: if prices.parquet already exists and its date range covers
-    the configured window (with a small grace window for market holidays)
-    and the ticker set matches, the cached file is returned without
-    re-downloading. The yfinance API is not perfectly deterministic across
-    calls (minor float drift on adjusted prices), so we treat the cache
-    as the source of truth and never re-download unless it is stale.
-    """
+    """Download OHLCV, align to common calendar, cache as long-format Parquet.
+    Idempotent: returns cached file if date range and ticker set match."""
     tickers = all_tickers(cfg)
     start = cfg["universe"]["start_date"]
     end = cfg["universe"]["end_date"]
@@ -278,12 +249,7 @@ def download_prices(cfg: dict) -> pd.DataFrame:
 
 
 def _sector_lookup(_cfg: dict) -> dict[str, str]:  # noqa: ARG001
-    """Map ticker → GICS sector. Hard-coded here because the spec
-    requires the assignment to be deliberate and documented; the
-    canonical list also lives at the top of configs.yaml. The config
-    argument is kept for API consistency with the other helpers in
-    this file (every step accepts cfg) and for future per-ticker
-    overrides from configs.yaml."""
+    """Map ticker → GICS sector."""
     return {
         "AAPL": "Information Technology", "MSFT": "Information Technology",
         "JPM":  "Financials",             "BRK-B": "Financials", "GS": "Financials",
@@ -298,23 +264,10 @@ def _sector_lookup(_cfg: dict) -> dict[str, str]:  # noqa: ARG001
     }
 
 
-# ──────────────────────────────────────────────────────────────────────
-# Step 2 — Target construction
-# ──────────────────────────────────────────────────────────────────────
 
 def build_targets(prices: pd.DataFrame, cfg: dict | None = None) -> pd.DataFrame:
-    """Next-day excess return per (date, ticker).
-
-        excess_return[stock, t] = daily_return[stock, t+1]
-                                  - mean(daily_return[all stocks, t+1])
-
-    The label at date t is the excess return realised on the *next*
-    trading day. The final row (last date) has no label and is dropped.
-
-    The "universe" mean is computed over the 20 stock tickers only —
-    the two global series (^GSPC, ^VIX) are features (7 and 8) applied
-    identically to every stock, not part of the cross-sectional mean.
-    """
+    """Next-day excess return: daily_return[t+1] - cross_sectional_mean[t+1].
+    Label at date t describes what happens on t+1. Final row dropped."""
     # Resolve which tickers belong to the universe (20) vs the global
     # series (^GSPC, ^VIX). When cfg is provided we use the configured
     # ticker list; otherwise we infer "global" by the leading caret.
@@ -353,9 +306,6 @@ def build_targets(prices: pd.DataFrame, cfg: dict | None = None) -> pd.DataFrame
     return long
 
 
-# ──────────────────────────────────────────────────────────────────────
-# CLI
-# ──────────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(description="DMRGT Phase 1 data pipeline")

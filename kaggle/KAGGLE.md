@@ -87,34 +87,33 @@ notebook runs).
 
 ## 2. Upload the code as a second Kaggle Dataset (`dmrgt-code`)
 
-The training code in `kaggle/code/` is the second dataset. It is
-separate from the cache so the cache can be re-versioned without
-re-versioning the code (and vice versa).
+The training code in `kaggle/code/` is the second dataset. Only two files
+live there permanently — the rest are copied from root by the build script:
 
 ```
 kaggle/code/
-├── configs.yaml    # the same configs.yaml from the project root
-├── data.py         # only load_config() + all_tickers()
-├── model.py        # the shared Transformer
-├── paths.py        # the same paths.py from the project root
-├── splits.py       # the same splits.py from the project root
-└── train.py        # the per-fold × per-seed trainer
+├── data.py              # slimmed down — only load_config() + all_tickers()
+├── dataset-metadata.json
+├── configs.yaml         # copied from root by build_code_dataset.sh
+├── model.py             #   "
+├── paths.py             #   "
+├── splits.py            #   "
+└── train.py             #   "
 ```
 
-Same drill as the cache dataset:
+**Before uploading, assemble the dataset:**
 
 ```bash
-kaggle datasets init -p kaggle/code/
-
-# Edit kaggle/code/dataset-metadata.json — set:
-#   "title": "dmrgt-code"
-#   "id": "<your-kaggle-username>/dmrgt-code"
-kaggle datasets create -p kaggle/code/
+bash kaggle/build_code_dataset.sh
 ```
 
-**Alternative (simpler, less reproducible):** skip the dataset and
-paste the contents of each file into a single big notebook cell. This
-loses versioning but works for a one-shot run.
+This copies the five root files into `kaggle/code/`. Then upload:
+
+```bash
+kaggle datasets create -p kaggle/code/
+# or for updates:
+kaggle datasets version -p kaggle/code/ -m "updated train.py"
+```
 
 ---
 

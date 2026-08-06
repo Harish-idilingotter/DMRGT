@@ -1,50 +1,8 @@
-"""DMRGT Phase 1 — Transformer trainer (§7.2 of build spec).
+"""DMRGT Phase 1 — Transformer trainer (§7.2).
 
-This is the Kaggle-side training module. It runs in the Kaggle GPU
-notebook attached to the ``dmrgt-cache`` dataset. Its single job:
-
-    load cached features/targets → train the model → emit predictions
-
-It does NOT run a backtest, does NOT compute rank IC, does NOT fit a
-scaler outside the training window. All those responsibilities belong
-to ``eval.py``, which runs locally over the downloaded
-``predictions.parquet``.
-
-The local/Kaggle split is the key architectural decision of Phase 1:
-training is decoupled from evaluation. The output of this script is
-a single ``predictions.parquet``; everything downstream is computed
-locally from that file.
-
-Outputs (all written to ``paths.OUTPUT_DIR``, which is
-``/kaggle/working`` on Kaggle or ``./artifacts`` locally):
-
-  • ``predictions.parquet``  — fold, seed, date, ticker, y_pred, y_true
-  • ``train_metrics.json``   — per-epoch train/val loss per fold+seed
-  • ``run_manifest.json``    — dataset version, git commit, config
-                               snapshot, library versions, GPU model,
-                               timestamps, fitted scaler stats, fold
-                               date boundaries
-  • ``checkpoints/``         — one .pt per fold×seed
-
-Per the spec, the per-fold procedure is:
-
-  1. Load cached features/targets via ``paths.py``.
-  2. Fit ``StandardScaler`` on TRAINING DATES ONLY (§1.1). Apply
-     frozen parameters to val and test.
-  3. Assemble samples — one per trading day — of shape
-     ``[n_stocks, lookback, n_features]`` and label ``[n_stocks]``.
-  4. Train with Huber loss, Adam optimiser, learning rate from
-     config. Early stopping on val loss with configured patience.
-  5. Repeat for all seeds in config.
-  6. Append test-set predictions to the running ``predictions.parquet``.
-
-Hard assertions (§7.2):
-  • No test date appears in the training set.
-  • Train/test windows are chronologically disjoint.
-  • Scaler was fitted before any test data was touched.
-  • Input tensor shape is exactly ``[n_stocks, lookback, n_features]``.
-  • Loaded parquet hashes match ``hashes.json`` before training starts.
-  • Hashes.json missing ⇒ HALT (the integrity gate must not be advisory).
+Kaggle-side training: load cached features/targets, train the model,
+emit predictions.parquet. Does NOT run backtests or compute rank IC —
+those belong to eval.py running locally.
 """
 
 from __future__ import annotations
@@ -72,13 +30,8 @@ import paths
 import splits as sp
 
 
-# ─── Config loading ────────────────────────────────────────────────────────
-
 def load_config(path: str | Path | None = None) -> dict:
-    """Load configs.yaml. Defaults to paths.CONFIG, which resolves to
-    the code dataset on Kaggle and the project root locally. Never use
-    a relative path here — on Kaggle the CWD is /kaggle/working and
-    configs.yaml lives in the read-only dmrgt-code dataset."""
+    """Load configs.yaml. Defaults to paths.CONFIG."""
     p = Path(path) if path is not None else paths.CONFIG
     if not p.exists():
         raise FileNotFoundError(
@@ -87,8 +40,6 @@ def load_config(path: str | Path | None = None) -> dict:
         )
     return yaml.safe_load(p.read_text())
 
-
-# ─── Hash verification (§7.2 — halt on mismatch) ─────────────────────────
 
 def sha256_of_file(path: Path) -> str:
     h = hashlib.sha256()
@@ -99,13 +50,9 @@ def sha256_of_file(path: Path) -> str:
 
 
 def verify_cache_hashes(stop_on_mismatch: bool = True) -> dict[str, str]:
-    """Recompute SHA-256 for each cached parquet and compare against
-    hashes.json. Non-file keys (e.g. ``generated_at``) are metadata and
-    are skipped. Missing hashes.json is fatal — this is the integrity
-    gate, and an unverifiable cache must not be trained on.
-
-    Returns a dict of ``{filename: hash}`` actually found on disk.
-    """
+    """Recompute SHA-256 of each cached parquet, compare against hashes.json.
+    Returns {filename: hash} for the files on disk. Halts on mismatch
+    unless stop_on_mismatch=False."""
     if not paths.HASHES_JSON.exists():
         raise RuntimeError(
             f"HALT: {paths.HASHES_JSON} not found. Cannot verify data "
@@ -162,7 +109,6 @@ def verify_cache_hashes(stop_on_mismatch: bool = True) -> dict[str, str]:
     return found
 
 
-# ─── Data assembly ─────────────────────────────────────────────────────────
 
 @dataclass
 class FoldTensors:
@@ -191,16 +137,7 @@ def assemble_fold(
     targets: pd.DataFrame,
     cfg: dict,
 ) -> FoldTensors:
-    """Build the per-fold train/val/test tensors.
-
-    The scaler is fitted on the training days only and then applied
-    to val and test. The fitted mean/std are stored on the result so
-    they land in the run manifest.
-
-    Lookback window spec (§4): the label at date ``t`` is the prediction
-    made on day ``t`` using data up to and INCLUDING day ``t``. The
-    window is therefore ``[t-lookback+1 .. t]`` inclusive.
-    """
+    """Build per-fold train/val/test tensors. Scaler fitted on train only."""
     universe = list(cfg["universe"]["tickers"])
 
     # Feature columns come from config — NEVER inferred by string-
@@ -338,7 +275,6 @@ def assemble_fold(
     )
 
 
-# ─── Training loop ─────────────────────────────────────────────────────────
 
 def set_seed(seed: int) -> None:
     """Pin every RNG we use. torch + numpy + (best-effort) cuDNN."""
@@ -356,9 +292,7 @@ def train_one_seed(
     seed: int,
     device: torch.device,
 ) -> tuple[pd.DataFrame, np.ndarray, dict]:
-    """Train the model for one seed on one fold. Returns
-    (per_epoch_metrics_df, test_predictions [n_test_days, n_stocks],
-    best_state_dict)."""
+    """Train one seed on one fold. Returns (metrics_df, test_pred, best_state)."""
     set_seed(seed)
 
     epochs = int(cfg["training"]["epochs"])
@@ -450,7 +384,6 @@ def train_one_seed(
     return pd.DataFrame(metrics), test_pred, best_state
 
 
-# ─── Run manifest ──────────────────────────────────────────────────────────
 
 def _git_commit() -> str:
     try:
@@ -481,22 +414,11 @@ def build_run_manifest(
     }
 
 
-# ─── Top-level driver ──────────────────────────────────────────────────────
 
 def run_all(cfg: dict, verify_hashes: bool = True,
             hashes: dict[str, str] | None = None) -> None:
-    """Run all folds × all seeds and write outputs to OUTPUT_DIR.
-
-    Parameters
-    ----------
-    verify_hashes : bool
-        If True, recompute and verify parquet hashes against hashes.json.
-    hashes : dict or None
-        Pre-verified hashes from a prior ``verify_cache_hashes()`` call.
-        Required when ``verify_hashes=False`` — this ensures the manifest
-        always records which data the run trained on. Passing
-        ``verify_hashes=False`` without ``hashes`` raises ValueError.
-    """
+    """Run all folds × all seeds, write outputs to OUTPUT_DIR.
+    Pass hashes= from a prior verify_cache_hashes() call when verify_hashes=False."""
     paths.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     ckpt_dir = paths.CHECKPOINTS_DIR
     ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -660,7 +582,6 @@ def run_all(cfg: dict, verify_hashes: bool = True,
         print(summary_df.to_string(index=False))
 
 
-# ─── CLI ───────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(description="DMRGT Phase 1 Transformer trainer")

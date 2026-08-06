@@ -1,21 +1,7 @@
-"""DMRGT Phase 1 — Step 6 driver (§8 of build spec).
+"""DMRGT Phase 1 — Step 6 comparison driver (§8).
 
-Runs the three models (random, persistence, Transformer) through the
-SAME ``eval.py`` code path and prints the comparison table specified
-in the spec:
-
-    | Model | Mean rank IC | Dir acc | Sharpe (after costs) | MDD | Turnover |
-
-The Transformer is loaded from ``artifacts/predictions.parquet``
-(generated on Kaggle via ``train.py`` and downloaded). If the
-predictions file is missing, the script runs the baseline
-comparison and prints a notice pointing to KAGGLE.md for the
-Transformer.
-
-Usage:
-    python compare.py                  # run all three
-    python compare.py --skip-tx        # run baselines only
-    python compare.py --tx-only        # only re-evaluate predictions
+Runs random, persistence, and Transformer through the same eval.py path.
+Usage: python compare.py [--skip-tx | --tx-only]
 """
 
 from __future__ import annotations
@@ -24,7 +10,6 @@ import argparse
 import sys
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
 import baselines
@@ -52,7 +37,7 @@ def run_baselines(cfg: dict, features: pd.DataFrame, targets: pd.DataFrame,
 
 def run_transformer(cfg: dict, targets: pd.DataFrame,
                     predictions_path: Path) -> list[ev.FoldResult]:
-    """Re-evaluate the downloaded predictions.parquet."""
+    """Re-evaluate downloaded predictions.parquet."""
     if not predictions_path.exists():
         print(f"[compare] predictions file not found: {predictions_path}",
               file=sys.stderr)
@@ -65,7 +50,7 @@ def run_transformer(cfg: dict, targets: pd.DataFrame,
 
 
 def aggregate_to_table(results: list[ev.FoldResult]) -> pd.DataFrame:
-    """Flatten FoldResults to a tidy DataFrame."""
+    """Flatten FoldResults to a DataFrame."""
     rows = []
     for r in results:
         d = r.fold_metrics.__dict__.copy()
@@ -74,12 +59,7 @@ def aggregate_to_table(results: list[ev.FoldResult]) -> pd.DataFrame:
 
 
 def per_model_summary(table: pd.DataFrame) -> pd.DataFrame:
-    """Group by model and report mean ± std across (folds × seeds).
-
-    For random and persistence, "seeds" is just one row per fold
-    (so std is across folds). For the Transformer, the std is across
-    both folds AND seeds, which is what the spec asks for.
-    """
+    """Group by model, report mean ± std across folds and seeds."""
     metric_cols = ["mean_rank_ic", "directional_acc", "sharpe_after_costs",
                    "max_drawdown", "turnover", "cum_return"]
     grouped = table.groupby("model")[metric_cols].agg(["mean", "std"])
@@ -89,7 +69,7 @@ def per_model_summary(table: pd.DataFrame) -> pd.DataFrame:
 
 
 def per_fold_summary(table: pd.DataFrame) -> pd.DataFrame:
-    """For the Transformer, show per-fold results aggregated across seeds."""
+    """Transformer per-fold results, aggregated across seeds."""
     metric_cols = ["mean_rank_ic", "directional_acc", "sharpe_after_costs",
                    "max_drawdown", "turnover", "cum_return"]
     tx = table[table["model"] == "transformer"]

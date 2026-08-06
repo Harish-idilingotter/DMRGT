@@ -1,22 +1,7 @@
 """Environment-aware path resolution.
 
-Every module in this project imports paths from here. No module may build a
-path by hand. This is the single source of truth for where data lives in
-local development and on Kaggle.
-
-The Kaggle branch is detected by the presence of /kaggle/input — that path
-is mounted by Kaggle whenever a notebook has a dataset attached. On Kaggle,
-/kaggle/input is read-only; everything we generate goes to /kaggle/working.
-
-Observed Kaggle mount layouts (newest last):
-
-    /kaggle/input/<slug>
-    /kaggle/input/datasets/<slug>
-    /kaggle/input/datasets/<username>/<slug>
-
-We resolve via candidates + a recursive fallback. The fallback handles
-future layout changes without a code edit. Failure raises with a real
-directory listing so the message describes what actually exists.
+Detects local vs Kaggle via /kaggle/input. Every module imports paths from
+here — no hardcoded paths anywhere.
 """
 
 from __future__ import annotations
@@ -34,17 +19,8 @@ def is_kaggle() -> bool:
 
 
 def _resolve_kaggle_dataset(slug: str) -> Path:
-    """Locate an attached Kaggle dataset across all known mount layouts.
-
-    Observed layouts, newest last:
-      /kaggle/input/<slug>
-      /kaggle/input/datasets/<slug>
-      /kaggle/input/datasets/<username>/<slug>
-
-    The rglob fallback handles any layout not listed above. Failure
-    raises with a real directory listing so the message describes what
-    exists rather than what was expected.
-    """
+    """Locate an attached Kaggle dataset. Tries known mount layouts, then
+    falls back to rglob. Raises with directory listing on failure."""
     for c in (KAGGLE_INPUT / slug,
               KAGGLE_INPUT / "datasets" / slug):
         if c.is_dir():

@@ -67,6 +67,13 @@ ipython_config.py
 .DS_Store
 Thumbs.db
 
+# ── Kaggle code dataset (assembled by kaggle/build_code_dataset.sh) ────
+kaggle/code/configs.yaml
+kaggle/code/model.py
+kaggle/code/paths.py
+kaggle/code/splits.py
+kaggle/code/train.py
+
 # ── Logs ──────────────────────────────────────────────────────────────
 *.log
 logs/

@@ -1,39 +1,8 @@
-"""Local-vs-Kaggle structural cross-check (KAGGLE.md §7).
+"""Local-vs-Kaggle structural cross-check.
 
-The purpose of this script is to confirm that the local environment and
-the Kaggle environment are reading the **same data** and constructing
-the **same folds**. It is NOT a model-quality comparison — the local
-run uses fewer epochs than Kaggle, so validation loss and Rank IC
-magnitudes are not expected to match.
-
-Run locally:
-
-    python verify_env.py --fold 0 --seed 0 --epochs 3
-
-Optionally compare against a Kaggle `run_manifest.json`:
-
-    python verify_env.py --fold 0 --seed 0 --epochs 3 \\
-        --compare artifacts/run_manifest.json
-
-The script then prints a structured report and exits non-zero on any
-structural mismatch.
-
-What it reports (each must match the Kaggle manifest exactly):
-
-  • Number of training / validation / test samples for the fold
-  • First and last training / test date
-  • Ticker list and count
-  • SHA-256 of each parquet in cache/
-
-What it explicitly does NOT report (because they don't depend on the
-environment and so don't catch divergence):
-
-  • Validation loss
-  • Rank IC magnitude
-  • Any per-batch or per-epoch metric
-
-All path resolution goes through `paths.py` — there is exactly one
-place in the project where paths live.
+Confirms both environments read the same data and construct the same folds.
+Does NOT compare losses or rank IC — those depend on training duration and
+numerical kernels, not on environment.
 """
 
 from __future__ import annotations
@@ -53,7 +22,6 @@ import splits as sp
 import train
 
 
-# ─── SHA-256 helpers ──────────────────────────────────────────────────────
 
 def _sha256_of_file(path: Path) -> str:
     h = hashlib.sha256()
@@ -63,7 +31,6 @@ def _sha256_of_file(path: Path) -> str:
     return h.hexdigest()
 
 
-# ─── Report builder ───────────────────────────────────────────────────────
 
 def _date_span(dates: np.ndarray | pd.DatetimeIndex) -> tuple[str | None, str | None]:
     if len(dates) == 0:
@@ -73,8 +40,7 @@ def _date_span(dates: np.ndarray | pd.DatetimeIndex) -> tuple[str | None, str | 
 
 
 def build_report(fold_idx: int, seed: int, cfg: dict) -> dict:
-    """Load the cache, build the fold, return a flat dict of
-    structural invariants. This is the local half of the diff."""
+    """Load cache, build fold, return structural invariants dict."""
     if not paths.PRICES.exists():
         raise FileNotFoundError(f"{paths.PRICES} missing")
     if not paths.FEATURES.exists():
@@ -124,12 +90,9 @@ def build_report(fold_idx: int, seed: int, cfg: dict) -> dict:
     }
 
 
-# ─── Optional run (one fold × one seed, n epochs) ─────────────────────────
 
 def run_one_fold(fold_idx: int, seed: int, epochs: int, cfg: dict) -> None:
-    """Optionally train the model for the requested fold/seed/epoch
-    count. Used only to populate `run_manifest.json` with the local
-    values; the structural report itself does not need this."""
+    """Train one fold×seed for the cross-check run."""
     # Quick override of epochs for the cross-check run
     local_cfg = json.loads(json.dumps(cfg))  # deep copy
     local_cfg["training"]["epochs"] = int(epochs)
@@ -143,7 +106,6 @@ def run_one_fold(fold_idx: int, seed: int, epochs: int, cfg: dict) -> None:
     train.run_all(local_cfg, verify_hashes=True)
 
 
-# ─── Comparison against a Kaggle run_manifest.json ────────────────────────
 
 def _kaggle_manifest_fold(manifest: dict, fold_name: str) -> dict | None:
     for fr in manifest.get("fold_results", []):
@@ -153,9 +115,7 @@ def _kaggle_manifest_fold(manifest: dict, fold_name: str) -> dict | None:
 
 
 def compare_against_manifest(report: dict, manifest_path: Path) -> bool:
-    """Diff the local report against a Kaggle run_manifest.json.
-    Returns True if everything matches, False otherwise.
-    """
+    """Diff local report against Kaggle run_manifest.json."""
     if not manifest_path.exists():
         print(f"[verify] WARN: {manifest_path} not found — skipping comparison",
               file=sys.stderr)
@@ -225,7 +185,6 @@ def _emit_compare_summary(failures: list[str]) -> bool:
     return False
 
 
-# ─── Reporting ────────────────────────────────────────────────────────────
 
 def print_report(report: dict) -> None:
     print("=" * 70)
@@ -253,7 +212,6 @@ def print_report(report: dict) -> None:
     print("    - any per-batch / per-epoch metric")
 
 
-# ─── CLI ──────────────────────────────────────────────────────────────────
 
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])

@@ -48,22 +48,26 @@ def _sha256(path: Path) -> str:
 # ─── Byte-identical guarantee ─────────────────────────────────────────────
 
 def test_paths_py_byte_identical_to_kaggle_copy():
-    """The two paths.py files must produce the same SHA-256. If they
-    drift, the guarantee that local and Kaggle runs behave the same
-    is lost — the fix description in this commit's message spells
-    out the regression this prevents."""
-    a = ROOT / "paths.py"
+    """The kaggle/code/paths.py copy is assembled by the build script.
+    Verify the build script exists and, when run, produces a byte-identical
+    copy of paths.py in kaggle/code/."""
+    import subprocess
+    build_script = ROOT / "kaggle" / "build_code_dataset.sh"
+    assert build_script.exists(), f"{build_script} missing"
+    # Run the build script to assemble the dataset
+    result = subprocess.run(
+        ["bash", str(build_script)],
+        cwd=str(ROOT), capture_output=True, text=True
+    )
+    assert result.returncode == 0, f"build script failed: {result.stderr}"
     b = ROOT / "kaggle" / "code" / "paths.py"
-    assert a.exists(), f"{a} missing"
-    assert b.exists(), f"{b} missing"
-    ha = _sha256(a)
+    assert b.exists(), f"{b} not created by build script"
+    ha = _sha256(ROOT / "paths.py")
     hb = _sha256(b)
     assert ha == hb, (
-        f"paths.py and kaggle/code/paths.py are no longer byte-identical. "
-        f"\n  {a}: {ha}"
+        f"paths.py and kaggle/code/paths.py are not byte-identical. "
+        f"\n  {ROOT / 'paths.py'}: {ha}"
         f"\n  {b}: {hb}"
-        f"\nApply the same edits to both files. They are the single source "
-        f"of truth for path resolution — drift between them is a Phase-1-blocking bug."
     )
 
 

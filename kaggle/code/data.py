@@ -1,14 +1,4 @@
-"""Slimmed-down data module for the Kaggle training notebook.
-
-On Kaggle, the only thing we need from ``data.py`` is the
-``load_config`` function (reads ``configs.yaml``). The price/target/
-features pipelines all run LOCALLY before the cache is uploaded; the
-Kaggle notebook only loads the pre-built Parquet files.
-
-This file is a copy of the relevant part of the main-directory
-``data.py`` so the notebook can import it without needing the rest of
-the data pipeline.
-"""
+"""Slimmed-down data module for Kaggle. Only load_config + all_tickers."""
 
 from __future__ import annotations
 

@@ -1,20 +1,8 @@
-"""DMRGT Phase 1 — walk-forward fold construction (Step E / §5.1).
+"""DMRGT Phase 1 — walk-forward fold construction (§5.1).
 
-Reads the fold definitions from configs.yaml and returns one Fold
-object per fold, each with explicit ``train_dates``, ``val_dates`` and
-``test_dates`` arrays. The module is the single source of truth for
-the train/test boundary — every consumer (baselines, train.py, eval.py)
-imports the same list of folds.
-
-Key invariants enforced here (and re-asserted by tests/test_leakage.py):
-  • max(train_dates) < min(test_dates) on every fold — chronological,
-    no random splits, ever (§1.2).
-  • The validation set is carved from the LATEST ~15% of the training
-    window, also chronologically — not randomly (§5.1).
-  • No fold's test window overlaps any later fold's training window in
-    a way that would let a model see the test answer during training.
-
-The validation fraction defaults to 0.15 and may be overridden per call.
+Chronological splits with expanding training windows. Validation carved
+from the latest ~15% of training. Single source of truth for train/test
+boundaries.
 """
 
 from __future__ import annotations
@@ -27,12 +15,7 @@ import pandas as pd
 
 @dataclass
 class Fold:
-    """One walk-forward fold.
-
-    All date arrays are pandas DatetimeIndex (sorted, unique) restricted
-    to dates that actually appear in the features/targets tables — the
-    fold is intersected with the available data at construction time.
-    """
+    """One walk-forward fold with train_dates, val_dates, test_dates."""
     name: str
     fold_idx: int
     train_dates: pd.DatetimeIndex
@@ -53,28 +36,8 @@ def make_folds(
     available_dates: Iterable[pd.Timestamp] | None = None,
     val_fraction: float = 0.15,
 ) -> list[Fold]:
-    """Build the walk-forward folds defined in configs.yaml.
-
-    Parameters
-    ----------
-    cfg : dict
-        The full configs.yaml dict. Reads ``folds: [...]``.
-    available_dates : iterable of Timestamps, optional
-        Dates that actually exist in the cached features/targets
-        tables. If provided, every fold's date windows are intersected
-        with this set — so a fold whose training window extends past
-        the data end is silently clipped rather than producing an
-        empty window. If None, the boundaries from the config are used
-        verbatim and only their chronological ordering is checked.
-    val_fraction : float
-        Fraction of the training window to reserve for validation
-        (chronologically the LATEST portion). Default 0.15 per §5.1.
-
-    Returns
-    -------
-    list[Fold]
-        One entry per configured fold, in config order.
-    """
+    """Build walk-forward folds from configs.yaml. val_fraction of train
+    reserved as validation (latest portion, chronological)."""
     if not 0.0 < val_fraction < 1.0:
         raise ValueError(f"val_fraction must be in (0, 1), got {val_fraction}")
 

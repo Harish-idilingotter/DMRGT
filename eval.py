@@ -1,38 +1,8 @@
-"""DMRGT Phase 1 — evaluation harness (Step G / §5.3).
+"""DMRGT Phase 1 — evaluation harness (§5.3).
 
-The single code path that turns predictions into numbers. Every model —
-random, persistence, Transformer — flows through the SAME function. If
-the backtest is generous, it is generous to everyone equally. If it is
-strict, it is strict to everyone equally. That is what makes the
-comparison honest.
-
-What this module computes per fold:
-
-  Prediction metrics (per test day, then aggregated per fold):
-    • Rank IC         — Spearman correlation between predicted and
-                        actual excess returns across the cross-section.
-                        The primary metric (§5.3).
-    • Directional acc — fraction of stocks where sign(pred) == sign(actual).
-    • Huber loss     — on the raw values, huber_delta from config.
-    • MSE            — on the raw values, retained as an ablation.
-
-  Backtest (via vectorbt, per §5.3):
-    • Each test day: long top decile, short bottom decile, equal-weight
-      within each leg. With 20 stocks and decile_fraction=0.2, that is
-      4 long and 4 short.
-    • commission_bps and slippage_bps applied to every position change.
-    • Reported: Sharpe (after costs), max drawdown, turnover, cumulative
-      return.
-
-Costs are active from the very first backtest run (§1.5). Reporting a
-cost-free number — even temporarily — is a violation.
-
-This module is also the place where the calibration check (§5.4) lives.
-``test_leakage.py`` runs random_model through ``evaluate_fold`` across
-all folds and asserts:
-  • mean rank IC within ±0.02 of 0.00
-  • directional accuracy within ±2% of 50%
-  • backtest return after costs is negative
+Every model (random, persistence, Transformer) flows through the same
+functions here. Rank IC, directional accuracy, Huber loss, MSE, and
+cost-aware backtest via vectorbt.
 """
 
 from __future__ import annotations
@@ -47,23 +17,13 @@ import vectorbt as vbt
 from scipy.stats import spearmanr
 
 
-# ─── MLflow logging (local file store; no server required) ────────────────
-#
-# Per §2.5: MLflow's local file store writes to disk and survives the
-# eval run. We log per-fold metrics under a single "dmrgt-phase1"
-# experiment so the comparison table is fully auditable from one
-# `mlflow ui` command. Disabled automatically if the env var
-# DMRGT_DISABLE_MLFLOW=1 is set, or if the mlflow import fails for
-# any reason — the eval pipeline must not depend on MLflow being
-# available to run.
-
 _MLFLOW_DISABLED = os.environ.get("DMRGT_DISABLE_MLFLOW", "0") == "1"
 _MLFLOW: object | None = None
 
 
 def _maybe_init_mlflow(experiment: str = "dmrgt-phase1",
                        tracking_uri: str | None = None) -> bool:
-    """Initialise MLflow once. Returns True if logging is active."""
+    """Init MLflow once. Returns True if logging is active."""
     global _MLFLOW
     if _MLFLOW_DISABLED:
         return False
@@ -135,15 +95,7 @@ def log_fold_to_mlflow(fold_metrics, cfg: dict | None = None,
 
 
 def _huber_loss(residuals: np.ndarray, delta: float) -> np.ndarray:
-    """Per-element Huber loss, vectorised.
-
-    L(r) = 0.5 r^2                    if |r| <= delta
-           delta (|r| - 0.5 delta)    otherwise
-
-    This is the same piecewise form scipy.optimize uses. We implement
-    it directly because scipy.stats doesn't expose huber in recent
-    versions, and we want a pure vector operation.
-    """
+    """Per-element Huber loss: quadratic for |r|<=delta, linear otherwise."""
     r = np.asarray(residuals, dtype=np.float64)
     abs_r = np.abs(r)
     quadratic = 0.5 * r * r
@@ -151,7 +103,6 @@ def _huber_loss(residuals: np.ndarray, delta: float) -> np.ndarray:
     return np.where(abs_r <= delta, quadratic, linear)
 
 
-# ─── Containers ────────────────────────────────────────────────────────────
 
 @dataclass
 class FoldMetrics:
@@ -193,7 +144,6 @@ class FoldResult:
     backtest_returns: pd.Series  # daily returns from the backtest
 
 
-# ─── Per-day prediction metrics ─────────────────────────────────────────────
 
 def per_day_rank_ic(pred: np.ndarray, true: np.ndarray) -> float:
     """Spearman rank IC for a single cross-section.
@@ -248,7 +198,6 @@ def per_day_mse(pred: np.ndarray, true: np.ndarray) -> float:
     return float(np.mean((p - t) ** 2))
 
 
-# ─── Backtest ──────────────────────────────────────────────────────────────
 
 def backtest_daily_deciles(
     predictions_by_day: pd.DataFrame,
@@ -378,7 +327,6 @@ def backtest_daily_deciles(
     }
 
 
-# ─── Top-level: evaluate one model on one fold ─────────────────────────────
 
 def evaluate_fold(
     model_name: str,
@@ -390,37 +338,8 @@ def evaluate_fold(
     seed: int | None = None,
     lookback: int = 30,
 ) -> FoldResult:
-    """Run one model through the full per-day harness on one fold.
-
-    Parameters
-    ----------
-    model_name : str
-        Label for the result row (e.g. "random", "persistence", "tx").
-    model_fn : callable
-        ``model_fn(X) -> y_pred`` where ``X`` has shape
-        ``[n_stocks, lookback, n_features]`` and ``y_pred`` has shape
-        ``[n_stocks]``. NaN-safe; the harness filters invalid days.
-    fold : Fold
-        A ``splits.Fold`` object with ``train_dates``, ``val_dates``,
-        ``test_dates``.
-    features : DataFrame
-        Long format ``date | ticker | f1..f8`` — the unscaled features
-        table from cache/features.parquet.
-    targets : DataFrame
-        Long format ``date | ticker | excess_return`` — the target
-        table from cache/targets.parquet.
-    cfg : dict
-        Full configs.yaml dict. Reads ``backtest.*``.
-    seed : int, optional
-        Forwarded to the model function for reproducibility.
-    lookback : int
-        Number of past days fed to the model. Must match
-        ``features.lookback_days``. 30 is the Phase 1 default.
-
-    Returns
-    -------
-    FoldResult
-    """
+    """Run one model through the per-day harness on one fold.
+    model_fn(X) -> y_pred where X is [n_stocks, lookback, n_features]."""
     universe = list(cfg["universe"]["tickers"])
     n_stocks = len(universe)
     feature_cols = [c for c in features.columns if c.startswith("f") and "_" in c]
@@ -548,7 +467,6 @@ def evaluate_fold(
     )
 
 
-# ─── Aggregation across folds / seeds ─────────────────────────────────────
 
 def summarise(results: Iterable[FoldResult]) -> pd.DataFrame:
     """Flatten a list of FoldResults into a tidy DataFrame."""
@@ -556,7 +474,6 @@ def summarise(results: Iterable[FoldResult]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-# ─── Step 6 entry point: consume predictions.parquet from the Kaggle run ──
 
 def evaluate_predictions(
     predictions_path,
@@ -564,36 +481,8 @@ def evaluate_predictions(
     cfg: dict,
     universe: list[str] | None = None,
 ) -> list[FoldResult]:
-    """Re-evaluate a downloaded ``predictions.parquet`` through the
-    same code path as ``evaluate_fold``.
-
-    The model itself runs on Kaggle and emits only predictions. Every
-    metric — Rank IC, dir acc, Huber, MSE, and the cost-aware backtest
-    — is computed here, locally, so the comparison is honest: random
-    and persistence baselines go through ``evaluate_fold``, the
-    Transformer goes through ``evaluate_predictions``, but both call
-    the SAME ``backtest_daily_deciles`` and per-day metric functions.
-
-    Parameters
-    ----------
-    predictions_path : path-like
-        Path to ``predictions.parquet`` with columns
-        ``fold, seed, date, ticker, y_pred, y_true``.
-    targets : DataFrame
-        The local ``cache/targets.parquet`` (for the realised return
-        used by the backtest).
-    cfg : dict
-        Full configs.yaml dict. Reads ``backtest.*``.
-    universe : list of str, optional
-        Stock ticker order. If None, read from cfg.
-
-    Returns
-    -------
-    list[FoldResult]
-        One entry per (fold, seed). Multiple seeds of the same fold
-        share the same backtest cost assumptions; the summary table
-        then averages across seeds.
-    """
+    """Re-evaluate a downloaded predictions.parquet through the same
+    code path as evaluate_fold. One FoldResult per (fold, seed)."""
     if universe is None:
         universe = list(cfg["universe"]["tickers"])
     pred_df = pd.read_parquet(predictions_path)
