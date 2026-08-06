@@ -1,0 +1,112 @@
+# DMRGT Phase 1 — single source of truth for all hyperparameters, tickers,
+# costs, seeds, and fold boundaries. Every module reads from this file.
+# Nothing in script code may hardcode a value that also lives here.
+
+# ─── Universe ──────────────────────────────────────────────────────────────
+# 20 liquid S&P 100 constituents stratified across the 8 GICS sectors
+# requested in §3 of the build spec. Sector diversity matters because
+# Phase 2 will add sector edges and negative-correlation edges, both of
+# which need cross-sector variety to be meaningful. Roughly 2-3 per sector.
+#
+# Sector mapping (per GICS):
+#   Information Technology        — AAPL, MSFT
+#   Financials                    — JPM, BRK-B, GS
+#   Health Care                   — JNJ, PFE, UNH
+#   Energy                       — XOM, CVX
+#   Consumer Discretionary       — AMZN, HD, NKE
+#   Consumer Staples             — PG, KO
+#   Industrials                  — HON, CAT, BA
+#   Utilities                    — NEE, DUK
+# Plus the two global series (^GSPC, ^VIX) — applied identically to every
+# stock on a given date and used as features 7 and 8.
+universe:
+  tickers:
+    - AAPL
+    - MSFT
+    - JPM
+    - BRK-B
+    - GS
+    - JNJ
+    - PFE
+    - UNH
+    - XOM
+    - CVX
+    - AMZN
+    - HD
+    - NKE
+    - PG
+    - KO
+    - HON
+    - CAT
+    - BA
+    - NEE
+    - DUK
+  global_series:
+    - ^GSPC      # S&P 500 index — feature 7 (market return)
+    - ^VIX       # Volatility index — feature 8
+  start_date: "2015-01-01"
+  end_date:   "2024-12-31"
+
+# ─── Features ──────────────────────────────────────────────────────────────
+# Computed locally in features.py. Lookback days determines the temporal
+# input dimension [n_stocks, lookback_days, 8].
+#
+# `columns` is the EXPLICIT list of feature columns that will be loaded
+# by train.assemble_fold(). It must agree with FEATURE_COLUMNS in
+# features.py — never infer the schema by string-matching the parquet
+# columns, because a future rename would silently select nothing.
+features:
+  lookback_days: 30
+  rsi_period: 14
+  atr_period: 14
+  ma_period: 10
+  volume_zscore_window: 60
+  columns: [f1_logret, f2_price_ma, f3_rsi, f4_macd, f5_atr,
+            f6_vol_zscore, f7_market_ret, f8_vix]
+  # f1 log-return, f2 price/10d MA, f3 RSI(14), f4 MACD,
+  # f5 ATR(14), f6 volume z-score, f7 market return, f8 VIX
+
+# ─── Training ──────────────────────────────────────────────────────────────
+# 5 seeds, as per §11 of the spec ("Seeds: ≥ 5 per configuration").
+training:
+  seeds: [0, 1, 2, 3, 4]
+  batch_size: 32
+  epochs: 50
+  learning_rate: 0.001
+  huber_delta: 1.0
+  early_stopping_patience: 10
+
+# ─── Backtest / cost model ────────────────────────────────────────────────
+# Costs are active from the very first backtest run (§1.5). Reporting a
+# cost-free number at any point in Phase 1 is a violation.
+backtest:
+  commission_bps: 10     # 0.10% per trade
+  slippage_bps: 5        # 0.05%
+  decile_fraction: 0.2   # top/bottom 20% for 20 stocks = 4 each
+
+# ─── Walk-forward folds ───────────────────────────────────────────────────
+# Defined explicitly per §5.1. Train window expands chronologically. The
+# most recent ~15% of each training window is reserved as validation for
+# early stopping (also chronological). The hard constraint asserted in
+# code is max(train_dates) < min(test_dates) on every fold.
+folds:
+  - name: "fold_1_2019_calm"
+    train_start: "2015-01-01"
+    train_end:   "2018-12-31"
+    test_start:  "2019-01-01"
+    test_end:    "2019-12-31"
+  - name: "fold_2_2020_covid"
+    train_start: "2015-01-01"
+    train_end:   "2019-12-31"
+    test_start:  "2020-01-01"
+    test_end:    "2020-12-31"
+  - name: "fold_3_2021"
+    train_start: "2015-01-01"
+    train_end:   "2020-12-31"
+    test_start:  "2021-01-01"
+    test_end:    "2021-12-31"
+  - name: "fold_4_2022_rates"
+    train_start: "2015-01-01"
+    train_end:   "2021-12-31"
+    test_start:  "2022-01-01"
+    test_end:    "2022-12-31"

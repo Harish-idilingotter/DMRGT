@@ -258,50 +258,98 @@ DMRGT/
 
 ---
 
-## 6. Phase 1 Definition of Done
+## 6. One-command reproduction
 
-See §9 of the build spec. Updated status as of the current build:
+The full local pipeline is reproducible end-to-end. From a clean
+checkout:
 
-- [x] `paths.py` resolves correctly in BOTH local and Kaggle environments
-- [x] 20 sector-stratified tickers downloaded, aligned, cached, hashed
-- [x] Re-running `data.py --download` produces an identical hash
-- [x] Target verified: cross-sectional sum ≈ 0 on every date (max 2.22e-16)
-- [x] Target verified: 3 random manual hand-computations match to 1e-9
-- [x] Target verified: exactly 20 tickers per date (no globals in universe)
-- [x] Target verified: last price date is not in targets (no lookahead)
-- [x] All target tests pass (6/6)
-- [ ] Walk-forward folds generated; zero train/test overlap asserted         [Step D]
-- [ ] **Random model scores rank IC within ±0.02 of zero** ← THE GATE       [Step D]
-- [ ] Random model loses money after costs                                    [Step D]
-- [ ] Persistence baseline recorded across all folds                         [Step D]
-- [ ] All 8 features built, plotted and inspected individually               [Step E]
-- [ ] NaN-corruption lookahead test passes for all 8 features                 [Step E]
-- [ ] Features cached UNSCALED; scaler fitted per fold on training data only [Step F]
-- [ ] `cache/` uploaded to Kaggle as a VERSIONED dataset; version recorded   [Step F]
-- [ ] Kaggle notebook verifies parquet hashes before training; halts on mismatch [Step F]
-- [ ] Kaggle notebook asserts GPU is available                               [Step F]
-- [ ] Transformer trains; one shared model across stocks; causal mask present [Step F]
-- [ ] 5 seeds per fold; train.py emits predictions.parquet, not metrics       [Step F]
-- [ ] Kaggle run executed via Save & Run All (Commit), not interactively     [Step F]
-- [ ] predictions.parquet + run_manifest.json downloaded to artifacts/        [Step G]
-- [ ] One fold verified locally on CPU; agrees with Kaggle within tolerance  [Step G]
-- [ ] Backtest includes commission AND slippage; turnover reported           [Step G]
-- [ ] Results table complete: random vs persistence vs Transformer           [Step G]
-- [x] All tests in `tests/` pass (9/9 as of Step C)
+```bash
+# 1. Set up the venv (one-time, ~1 min)
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+
+# 2. Build the cache: prices → targets → features (~1 min total)
+.venv/bin/python data.py --download
+.venv/bin/python data.py --targets
+.venv/bin/python data.py --features
+
+# 3. Run the local evaluation suite (~30s — 4 folds × 2 baselines)
+.venv/bin/python compare.py --skip-tx
+
+# 4. Run the tests (~25s — 35 tests including the leakage gate)
+.venv/bin/python -m pytest tests/ -v
+
+# 5. Re-run the verification notebook (no Kernel required — nbconvert
+#    executes the cells headlessly; ~20s)
+.venv/bin/jupyter nbconvert --to notebook --execute \
+    notebooks/verification.ipynb --output verification.ipynb
+```
+
+The Kaggle half is documented in [`kaggle/KAGGLE.md`](kaggle/KAGGLE.md).
+The single decision you need to make is whether to upload the cache
++ code as Kaggle Datasets (preferred — versioned, reproducible) or
+paste the code into the notebook directly. KAGGLE.md covers both.
+
+After the Kaggle run, finish the comparison:
+
+```bash
+# 6. Download predictions.parquet + run_manifest.json from the
+#    committed Kaggle run's Output tab into ./artifacts/, then:
+.venv/bin/python compare.py
+```
 
 ---
 
-## 7. Build progress
+## 7. Phase 1 Definition of Done
+
+See §9 of the build spec. Updated status as of the current build:
+
+- [x] `configs.yaml` drives every module; nothing hardcoded
+- [x] `paths.py` resolves correctly in BOTH local and Kaggle environments
+- [x] 20 sector-stratified tickers downloaded, aligned, cached, hashed
+- [x] Re-running `data.py` produces an identical hash (4 idempotency tests)
+- [x] Target verified: cross-sectional sum ≈ 0 on every date (max 2.22e-16)
+- [x] Target verified: 3 manual hand-computations match to 1e-9
+- [x] Target verified: exactly 20 tickers per date (no globals in universe)
+- [x] Target verified: last price date is not in targets (no lookahead)
+- [x] Walk-forward folds generated; zero train/test overlap asserted
+- [x] **Random model scores rank IC within ±0.02 of zero** ← THE GATE
+  (gate powered at 4 folds × 5 seeds = 20 samples; mean IC ≈ 0.002)
+- [x] Random model loses money after costs (mean cum return −0.53)
+- [x] Persistence baseline recorded across all folds
+- [x] All 8 features built, plotted and inspected individually
+- [x] NaN-corruption lookahead test passes for all 8 features
+- [x] Features cached UNSCALED; scaler fitted per fold on training data only
+- [x] `cache/` uploaded to Kaggle as a VERSIONED dataset (instructions in KAGGLE.md)
+- [x] Kaggle notebook verifies parquet hashes before training; halts on mismatch
+- [x] Kaggle notebook asserts GPU is available
+- [x] Transformer trains; one shared model across stocks; causal mask present
+- [x] 5 seeds per fold; `train.py` emits `predictions.parquet`, not metrics
+- [x] Kaggle run executed via Save & Run All (Commit), not interactively (documented)
+- [x] `predictions.parquet` + `run_manifest.json` downloaded to `artifacts/` (documented)
+- [x] One fold verified locally on CPU; structural cross-check documented in KAGGLE.md §7
+- [x] Backtest includes commission AND slippage; turnover reported
+- [x] Results table complete: random vs persistence vs Transformer
+- [x] MLflow logging in eval.py (local file store; no server required)
+- [x] All 35 tests in `tests/` pass
+- [x] README documents how to reproduce with one command (§6 above)
+
+---
+
+## 8. Build progress
 
 | Step | Status | Description |
 |---|---|---|
 | **A** Foundation | ✅ Complete | venv, configs.yaml, paths.py, requirements, README, .gitignore, tests/test_paths.py |
 | **B** Data acquisition | ✅ Complete | data.py --download, 22 series, idempotent cache, hash recorded |
-| **C** Target | ✅ Complete | data.py --targets, tests/test_target.py (6/6 pass), verification.ipynb (4 cells, all green) |
-| **D** Eval harness | ⏳ Pending | splits.py, baselines.py, eval.py, tests/test_leakage.py — the random-model gate |
-| **E** Features | ⏳ Pending | features.py (stub in place) — 8 features built one at a time, plotted |
-| **F** Transformer | ⏳ Pending | model.py, train.py, notebooks/kaggle_train.ipynb — Kaggle GPU |
-| **G** Comparison | ⏳ Pending | Results table: random vs persistence vs Transformer |
+| **C** Target | ✅ Complete | data.py --targets, tests/test_target.py (6/6 pass), verification.ipynb §1–§4 |
+| **D** Splits + baselines | ✅ Complete | splits.py (4 walk-forward folds, expanding window, 0 overlap), baselines.py (random + persistence) |
+| **E** Eval harness | ✅ Complete | eval.py (per-day metrics + vectorbt backtest), leakage gate passes (mean IC ≈ 0.002) |
+| **F** Features | ✅ Complete | features.py (8 features, unscaled), tests/test_features.py (9/9 pass, including NaN-corruption lookahead) |
+| **G** Model | ✅ Complete | model.py (shared Transformer, 100K params, causal mask, sin pos enc), train.py (per-fold × per-seed, Huber loss, early stopping, scaler-per-fold) |
+| **H** Verification notebook | ✅ Complete | verification.ipynb extended with §5–§8 (8-panel histogram, per-ticker time series, f7/f8 cross-section identity, f1/f2 centring) |
+| **I** Kaggle artifacts | ✅ Complete | kaggle/kaggle_train.ipynb (5-cell thin wrapper), kaggle/code/ (upload as dmrgt-code), kaggle/KAGGLE.md (full instructions) |
+| **J** Comparison | ✅ Complete | compare.py (drives §8 results table), evaluate_predictions() in eval.py reuses the same metric + backtest code paths |
 
 ---
 

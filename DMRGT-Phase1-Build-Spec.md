@@ -90,6 +90,35 @@ dmrgt/
     └── test_paths.py         # asserts paths.py resolves correctly in both envs
 ```
 
+> **AS-BUILT NOTE (added after the build):** The structure above is
+> the original brief. The actual layout in the repo at the end of
+> Phase 1 differs in three places — all of which are noted here so
+> the next agent has an accurate map of the code:
+>
+> 1. **`features.py` is a top-level module, not folded into `data.py`.**
+>    `data.py` exposes a `--features` CLI subcommand that calls
+>    `features.build_features()`, but the feature logic itself lives
+>    in its own file. This matches the original spec at the top of
+>    §6 ("File: `features.py`, called from `data.py`").
+> 2. **A `compare.py` driver exists at the top level** for Step 6
+>    (the §8 results table). It explicitly routes random, persistence,
+>    and Transformer predictions through the same `eval.py` code path
+>    so the comparison is honest. Spec put Step 6 inside `eval.py`;
+>    in practice a small CLI driver next to `eval.py` reads better.
+>    `eval.py` also exposes `evaluate_predictions()` as the entry
+>    point for the predictions.parquet → metrics path.
+> 3. **A `kaggle/` directory sits at the top level** with
+>    `kaggle/KAGGLE.md`, `kaggle/kaggle_train.ipynb` (the thin wrapper
+>    notebook), and `kaggle/code/` (the uploadable `dmrgt-code`
+>    dataset). The notebook lives inside the repo rather than at
+>    `notebooks/kaggle_train.ipynb` so the Kaggle artifacts are
+>    grouped together.
+>
+> An extra `tests/` file exists beyond the four in the spec:
+> `test_idempotency.py` (4 tests pinning `data.py` cache-hit
+> behaviour) and `test_universe.py` (7 tests pinning the sector
+> stratification). Both grew from §9 DoD gaps.
+
 **`configs.yaml` — create this first**, and have every module read from it. Nothing hardcoded in scripts.
 
 ```yaml

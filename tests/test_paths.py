@@ -4,10 +4,16 @@ The Kaggle branch is detected by the existence of /kaggle/input. We can't
 create that directory on macOS (read-only root), so we mock os.path.exists
 instead. The mocked resolution must produce the same path values that
 Kaggle would see.
+
+The two copies of paths.py — the project root and kaggle/code/ — must
+remain byte-identical so that local and Kaggle runs see the exact same
+path logic. This file tests that, plus the structural invariants of the
+local branch and the descriptive snapshot.
 """
 
 from __future__ import annotations
 
+import hashlib
 import importlib
 import os
 import sys
@@ -31,15 +37,48 @@ def _reload_paths():
     return importlib.import_module("paths")
 
 
+def _sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+# ─── Byte-identical guarantee ─────────────────────────────────────────────
+
+def test_paths_py_byte_identical_to_kaggle_copy():
+    """The two paths.py files must produce the same SHA-256. If they
+    drift, the guarantee that local and Kaggle runs behave the same
+    is lost — the fix description in this commit's message spells
+    out the regression this prevents."""
+    a = ROOT / "paths.py"
+    b = ROOT / "kaggle" / "code" / "paths.py"
+    assert a.exists(), f"{a} missing"
+    assert b.exists(), f"{b} missing"
+    ha = _sha256(a)
+    hb = _sha256(b)
+    assert ha == hb, (
+        f"paths.py and kaggle/code/paths.py are no longer byte-identical. "
+        f"\n  {a}: {ha}"
+        f"\n  {b}: {hb}"
+        f"\nApply the same edits to both files. They are the single source "
+        f"of truth for path resolution — drift between them is a Phase-1-blocking bug."
+    )
+
+
+# ─── Local resolution ─────────────────────────────────────────────────────
+
 def test_local_branch_default():
     """Without /kaggle/input present, paths.py must resolve to the project
     tree and create the cache and artifacts directories."""
     with mock.patch("os.path.exists", return_value=False):
-        # Make sure OUTPUT_DIR mkdir doesn't hit a real Kaggle path.
         paths = _reload_paths()
     assert paths.is_kaggle() is False
     assert paths.CACHE_DIR == ROOT / "cache"
     assert paths.OUTPUT_DIR == ROOT / "artifacts"
+    assert paths.CONFIG == ROOT / "configs.yaml"
+    assert paths.CONFIG.exists(), "configs.yaml must exist in the project root"
     assert (ROOT / "cache").exists(), "cache/ must be created on local import"
     assert (ROOT / "artifacts").exists(), "artifacts/ must be created on local import"
     assert paths.PRICES == ROOT / "cache" / "prices.parquet"
@@ -49,43 +88,194 @@ def test_local_branch_default():
     assert paths.PREDICTIONS == ROOT / "artifacts" / "predictions.parquet"
 
 
-def test_kaggle_branch_simulated():
-    """With /kaggle/input mocked present, paths.py must resolve CACHE_DIR
-    to /kaggle/input/dmrgt-cache and OUTPUT_DIR to /kaggle/working, and
-    must NOT try to mkdir /kaggle/input (read-only on Kaggle).
+# ─── Kaggle resolution (mocked) ───────────────────────────────────────────
 
-    We also patch Path.mkdir because /kaggle/working only exists inside
-    a real Kaggle container; on macOS the directory simply isn't there
-    and a real mkdir would (correctly) fail in a way unrelated to the
-    path-resolution logic we're testing.
+def test_kaggle_branch_resolves_via_candidate():
+    """With /kaggle/input mocked present but /kaggle/input/<slug>
+    missing, the resolver must try /kaggle/input/datasets/<slug>
+    before falling back to rglob.
 
-    The patch must remain active across the assertions: is_kaggle() is
-    a function, not a constant, and re-queries the filesystem each call.
+    We patch Path.is_dir so the second candidate reports as a
+    directory — simulating a layout that Kaggle has been observed to
+    use.
     """
-    with mock.patch("os.path.exists", return_value=True), \
+    real_is_dir = Path.is_dir
+
+    # Mark which candidate strings should look like directories
+    layout = {
+        "/kaggle/input/dmrgt-cache":         False,  # older layout absent
+        "/kaggle/input/datasets/dmrgt-cache": True,   # current layout present
+        "/kaggle/input/dmrgt-code":          False,
+        "/kaggle/input/datasets/dmrgt-code": True,
+    }
+
+    def _fake_is_dir(self):
+        s = str(self)
+        if s in layout:
+            return layout[s]
+        return real_is_dir(self)
+
+    real_exists = Path.exists
+
+    def _fake_exists(self):
+        s = str(self)
+        if s == "/kaggle/input":
+            return True
+        return real_exists(self)
+
+    def _fake_os_exists(p):
+        if p == "/kaggle/input":
+            return True
+        return os.path.exists(p)
+
+    with mock.patch("os.path.exists", side_effect=_fake_os_exists), \
+         mock.patch("pathlib.Path.is_dir", _fake_is_dir), \
+         mock.patch("pathlib.Path.exists", _fake_exists), \
          mock.patch("pathlib.Path.mkdir", return_value=None):
         paths = _reload_paths()
         assert paths.is_kaggle() is True
-        assert str(paths.CACHE_DIR) == "/kaggle/input/dmrgt-cache"
-        assert str(paths.OUTPUT_DIR) == "/kaggle/working"
-        # /kaggle/input is read-only on Kaggle; we must never create it.
-        # The fact that the patched mkdir never produced a real
-        # filesystem call is the assertion — if paths.py tried to mkdir
-        # /kaggle/input on the real filesystem, macOS would have raised
-        # before the patch.
-        assert str(paths.PRICES) == "/kaggle/input/dmrgt-cache/prices.parquet"
-        assert str(paths.FEATURES) == "/kaggle/input/dmrgt-cache/features.parquet"
-        assert str(paths.TARGETS) == "/kaggle/input/dmrgt-cache/targets.parquet"
+        # The resolver found the dataset under the current layout
+        # (the second candidate) — not the older layout.
+        assert str(paths.CACHE_DIR) == "/kaggle/input/datasets/dmrgt-cache"
+
+
+def test_kaggle_branch_raises_with_listing():
+    """If a slug doesn't match either candidate layout, the resolver
+    must raise FileNotFoundError with the actual /kaggle/input
+    listing so the user can see what really exists.
+
+    To get past the module-load call to _resolve_kaggle_dataset, we
+    have /kaggle/input/datasets/dmrgt-cache return True — the dmrgt-code
+    call will then come back later for a slug that truly doesn't
+    exist.
+    """
+    real_is_dir = Path.is_dir
+
+    present = {
+        "/kaggle/input/datasets/dmrgt-cache": True,
+        "/kaggle/input/datasets/dmrgt-code":  True,
+    }
+
+    def _fake_is_dir(self):
+        s = str(self)
+        if s in present:
+            return present[s]
+        return real_is_dir(self)
+
+    def _fake_os_exists(p):
+        if p == "/kaggle/input":
+            return True
+        return os.path.exists(p)
+
+    with mock.patch("os.path.exists", side_effect=_fake_os_exists), \
+         mock.patch("pathlib.Path.is_dir", _fake_is_dir), \
+         mock.patch("pathlib.Path.mkdir", return_value=None):
+        paths = _reload_paths()
+        # Now the module is loaded with both dmrgt-cache and dmrgt-code
+        # present (so the imports succeeded). Calling the resolver with
+        # a slug that truly isn't attached should raise.
+        with pytest.raises(FileNotFoundError) as excinfo:
+            paths._resolve_kaggle_dataset("definitely-not-here")
+        msg = str(excinfo.value)
+        assert "definitely-not-here" in msg, \
+            f"error message should name the slug: {msg!r}"
+        assert "/kaggle/input" in msg, \
+            f"error message should mention /kaggle/input: {msg!r}"
+        assert "Actual contents" in msg, \
+            f"error message should show what /kaggle/input actually " \
+            f"contains so the user can see what to attach: {msg!r}"
+        assert "RESTART THE SESSION" in msg, \
+            f"error message should warn the user to restart the " \
+            f"kernel after attaching: {msg!r}"
 
 
 def test_describe_returns_expected_keys():
     paths = _reload_paths()
     info = paths.describe()
-    for key in ("env", "CACHE_DIR", "OUTPUT_DIR", "PRICES",
-                "FEATURES", "TARGETS", "HASHES_JSON", "PREDICTIONS"):
+    for key in ("environment", "CACHE_DIR", "CODE_DIR", "OUTPUT_DIR",
+                "CONFIG", "config_exists",
+                "cache_exists", "cache_contents",
+                "prices_exists", "features_exists",
+                "targets_exists", "hashes_exists"):
         assert key in info, f"describe() missing key: {key}"
-    # After the previous test, /kaggle/input was mocked True, but we've
-    # now reloaded without the mock — env should be 'local' in this
-    # process. Either branch is acceptable as long as the value is one
-    # of the two valid options.
-    assert info["env"] in ("local", "kaggle")
+    # env should be 'local' in this process (we never mocked Kaggle here).
+    assert info["environment"] in ("local", "kaggle")
+
+
+def test_cache_parquets_canonical():
+    """The CACHE_PARQUETS tuple is the single source of truth for
+    which files get hashed. It must contain exactly the three
+    data parquets the spec names."""
+    paths = _reload_paths()
+    assert tuple(paths.CACHE_PARQUETS) == (
+        "prices.parquet",
+        "features.parquet",
+        "targets.parquet",
+    ), (
+        f"CACHE_PARQUETS changed: {paths.CACHE_PARQUETS}. "
+        f"train.py and the notebook both iterate this tuple — drift "
+        f"between them is a Phase-1-blocking bug."
+    )
+
+
+def test_kaggle_branch_resolves_nested_username_layout():
+    """The currently-observed Kaggle layout is
+    /kaggle/input/datasets/<username>/<slug>. The candidate resolver
+    does NOT include this exact path (no hardcoded username segment)
+    — the rglob fallback is what catches it."""
+    real_is_dir = Path.is_dir
+
+    present = {
+        # The 2 hardcoded candidates are absent.
+        "/kaggle/input/dmrgt-cache":         False,
+        "/kaggle/input/datasets/dmrgt-cache": False,
+        # The nested username layout is present.
+        "/kaggle/input/datasets/user-name/dmrgt-cache": True,
+        # Same for dmrgt-code so the module loads.
+        "/kaggle/input/dmrgt-code":          False,
+        "/kaggle/input/datasets/dmrgt-code": False,
+        "/kaggle/input/datasets/user-name/dmrgt-code":  True,
+    }
+
+    def _fake_is_dir(self):
+        s = str(self)
+        if s in present:
+            return present[s]
+        return real_is_dir(self)
+
+    real_exists = Path.exists
+
+    def _fake_exists(self):
+        s = str(self)
+        if s == "/kaggle/input":
+            return True
+        return real_exists(self)
+
+    real_rglob = Path.rglob
+
+    def _fake_rglob(self, pattern):
+        # The resolver calls KAGGLE_INPUT.rglob(slug). In the nested
+        # layout that path is "/kaggle/input/datasets/user-name/<slug>",
+        # so yield it when asked for the slug and we're on
+        # /kaggle/input.
+        if str(self) == "/kaggle/input":
+            for path, is_dir in present.items():
+                if pattern in path and is_dir:
+                    yield Path(path)
+            return
+        yield from real_rglob(self, pattern)
+
+    def _fake_os_exists(p):
+        if p == "/kaggle/input":
+            return True
+        return os.path.exists(p)
+
+    with mock.patch("os.path.exists", side_effect=_fake_os_exists), \
+         mock.patch("pathlib.Path.is_dir", _fake_is_dir), \
+         mock.patch("pathlib.Path.exists", _fake_exists), \
+         mock.patch("pathlib.Path.rglob", _fake_rglob), \
+         mock.patch("pathlib.Path.mkdir", return_value=None):
+        paths = _reload_paths()
+        assert paths.is_kaggle() is True
+        # rglob fallback found the nested-username layout.
+        assert str(paths.CACHE_DIR) == "/kaggle/input/datasets/user-name/dmrgt-cache"

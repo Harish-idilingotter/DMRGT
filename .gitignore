@@ -4,9 +4,6 @@
 #             Uploaded to Kaggle as the versioned `dmrgt-cache` dataset.
 # artifacts/: outputs downloaded from Kaggle runs (predictions, metrics,
 #             checkpoints, MLflow runs). Stays local.
-#
-# The directory *placeholders* (cache/.gitkeep, artifacts/.gitkeep) ARE
-# committed so the directories exist in the repo.
 
 # ── Virtual environment (recreate locally with `python -m venv .venv`) ─
 .venv/
@@ -31,6 +28,7 @@ artifacts/*.pt
 artifacts/*.pth
 artifacts/checkpoints/
 artifacts/mlruns/
+artifacts/mlflow.db
 
 # ── Python ─────────────────────────────────────────────────────────────
 __pycache__/

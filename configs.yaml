@@ -50,12 +50,21 @@ universe:
 # ─── Features ──────────────────────────────────────────────────────────────
 # Computed locally in features.py. Lookback days determines the temporal
 # input dimension [n_stocks, lookback_days, 8].
+#
+# `columns` is the EXPLICIT list of feature columns that will be loaded
+# by train.assemble_fold(). It must agree with FEATURE_COLUMNS in
+# features.py — never infer the schema by string-matching the parquet
+# columns, because a future rename would silently select nothing.
 features:
   lookback_days: 30
   rsi_period: 14
   atr_period: 14
   ma_period: 10
   volume_zscore_window: 60
+  columns: [f1_logret, f2_price_ma, f3_rsi, f4_macd, f5_atr,
+            f6_vol_zscore, f7_market_ret, f8_vix]
+  # f1 log-return, f2 price/10d MA, f3 RSI(14), f4 MACD,
+  # f5 ATR(14), f6 volume z-score, f7 market return, f8 VIX
 
 # ─── Training ──────────────────────────────────────────────────────────────
 # 5 seeds, as per §11 of the spec ("Seeds: ≥ 5 per configuration").

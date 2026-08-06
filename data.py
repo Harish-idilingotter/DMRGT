@@ -64,15 +64,63 @@ def sha256_of_file(path: Path) -> str:
     return h.hexdigest()
 
 
-def write_hashes(prices_path: Path, hashes_path: Path) -> None:
-    """Write a single hashes.json containing the SHA-256 of every cache
-    artefact currently on disk. Kaggle notebook re-verifies these."""
+def _read_hashes(hashes_path: Path) -> dict:
+    """Read the existing hashes.json (returns {} if absent or unreadable).
+    Each stage UPDATES this dict rather than overwriting it — running
+    `data.py --features` alone must not drop the prices.parquet entry
+    written by an earlier `--download`."""
     import json
-    hashes = {}
-    for p in [prices_path, paths.FEATURES, paths.TARGETS]:
+    if not hashes_path.exists():
+        return {}
+    try:
+        return json.loads(hashes_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def update_hashes(hashes_path: Path,
+                  parquet_paths: list[Path] | None = None) -> dict:
+    """Compute SHA-256 of each existing parquet and merge into
+    `hashes.json`, preserving entries for files this stage did not
+    touch. Adds a `generated_at` timestamp.
+
+    Every parquet that exists in CACHE_DIR at the end of the stage
+    must have a hash entry — see `_verify_hashes_complete`.
+    """
+    import json
+    from datetime import datetime, timezone
+
+    if parquet_paths is None:
+        parquet_paths = [paths.PRICES, paths.FEATURES, paths.TARGETS]
+
+    hashes = _read_hashes(hashes_path)
+    for p in parquet_paths:
         if p.exists():
             hashes[p.name] = sha256_of_file(p)
+    hashes["generated_at"] = (
+        datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    )
     hashes_path.write_text(json.dumps(hashes, indent=2, sort_keys=True))
+    return hashes
+
+
+def _verify_hashes_complete(hashes_path: Path) -> None:
+    """Hard assertion: every parquet currently in CACHE_DIR has a
+    matching entry in hashes.json. A failure here means a stage wrote
+    a partial file and dropped an entry for a parquet that still
+    exists on disk — that would be a divergence bug."""
+    import json
+    hashes = json.loads(hashes_path.read_text())
+    missing = []
+    for p in [paths.PRICES, paths.FEATURES, paths.TARGETS]:
+        if p.exists() and p.name not in hashes:
+            missing.append(p.name)
+    assert not missing, (
+        f"hashes.json is missing entries for: {missing}. "
+        f"This means a stage of data.py wrote a partial hashes.json "
+        f"without preserving existing entries. Re-run the stages in "
+        f"order: --download, --targets, --features."
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -221,8 +269,10 @@ def download_prices(cfg: dict) -> pd.DataFrame:
 
     h = sha256_of_file(paths.PRICES)
     print(f"\n[data] wrote {paths.PRICES}  sha256={h}")
-    # Also write a single-line .sha256 sidecar (handy for shell checks).
-    (paths.CACHE_DIR / "prices.sha256").write_text(h + "\n")
+    # Hashes for the cache are centralised in hashes.json (updated by
+    # update_hashes() in main() after this returns); we don't write a
+    # separate prices.sha256 sidecar — two sources of truth will
+    # eventually disagree (see KAGGLE.md §7).
 
     return aligned
 
@@ -320,8 +370,10 @@ def main():
     if args.download:
         download_prices(cfg)
         # Update hashes.json so it reflects the new prices file even if
-        # targets/features don't exist yet.
-        write_hashes(paths.PRICES, paths.HASHES_JSON)
+        # targets/features don't exist yet (entries for those are
+        # preserved from any previous run).
+        update_hashes(paths.HASHES_JSON)
+        _verify_hashes_complete(paths.HASHES_JSON)
         return
 
     if args.targets:
@@ -332,7 +384,8 @@ def main():
         targets = build_targets(prices, cfg)
         targets.to_parquet(paths.TARGETS, index=False)
         print(f"[data] wrote {paths.TARGETS}  rows={len(targets):,}")
-        write_hashes(paths.PRICES, paths.HASHES_JSON)
+        update_hashes(paths.HASHES_JSON)
+        _verify_hashes_complete(paths.HASHES_JSON)
         return
 
     if args.features:
@@ -353,7 +406,8 @@ def main():
         features.to_parquet(paths.FEATURES, index=False)
         print(f"[data] wrote {paths.FEATURES}  rows={len(features):,}")
         print(f"[data] features: {FEATURE_COLUMNS}")
-        write_hashes(paths.PRICES, paths.HASHES_JSON)
+        update_hashes(paths.HASHES_JSON)
+        _verify_hashes_complete(paths.HASHES_JSON)
         return
 
 
