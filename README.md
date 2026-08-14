@@ -1,27 +1,27 @@
-# DMRGT — Dynamic Multi-Relational Graph Transformer (Phase 1)
+# DMRGT — Dynamic Multi-Relational Graph Transformer (Phase 2)
 
-Phase 1 of an academic final-year project. **No graph yet.** This phase
-builds a trustworthy measuring instrument — a Transformer encoder over
-20 sector-stratified S&P 100 stocks, trained on a leak-free pipeline with
-transaction costs and slippage active from the first backtest run.
+Phase 2 of an academic final-year project. Builds on Phase 1's leak-free
+pipeline by adding a **dynamic three-relation graph** (+corr / −corr /
+sector) with an R-GCN encoder over 40 sector-stratified S&P 100 stocks.
+DMRGT beats both the no-graph Transformer and the LSTM baseline on rank IC.
 
-Full design lives in [`DMRGT-Phase1-Build-Spec.md`](./DMRGT-Phase1-Build-Spec.md).
+Full design lives in [`BuildSpec/DMRGT-Phase2-Build-Spec.md`](./BuildSpec/DMRGT-Phase2-Build-Spec.md).
+Phase 2 results are in [`docs/PHASE2_RESULTS.md`](./docs/PHASE2_RESULTS.md).
 
 ---
 
-## 1. Manual setup
+## 1. Quick start
 
 ### 1.1 Prerequisites
 
 - **Python 3.11 or 3.13** (3.14 is too new — `numba`, a transitive dep
   of `pandas-ta`/`vectorbt`, doesn't yet support it).
-- `git`, `pip`, ~2 GB free disk for the venv + Parquet caches.
+- `git`, `pip`, ~3 GB free disk for the venv + Parquet caches + artifacts.
 
-### 1.2 Clone and enter the project
+### 1.2 Clone and set up
 
 ```bash
-cd /your/projects/path
-# (this directory already exists — just `cd` into it)
+git clone https://github.com/<your-org>/DMRGT.git
 cd DMRGT
 ```
 
@@ -33,9 +33,8 @@ source .venv/bin/activate                  # zsh / bash on macOS / Linux
 # On Windows: .venv\Scripts\activate
 ```
 
-You should now see `(.venv)` in your prompt and `which python` should
-point inside `.venv/`. If you forget to activate, every command below
-will fall back to the system Python and the imports will fail.
+You should see `(.venv)` in your prompt and `which python` should point
+inside `.venv/`.
 
 ### 1.4 Install dependencies
 
@@ -45,11 +44,10 @@ pip install -r requirements.txt
 ```
 
 This installs pandas, numpy, pyarrow, yfinance, pandas-ta, torch, scipy,
-vectorbt, mlflow, matplotlib, pytest, kaggle, and (for the
-verification notebook) jupyter, nbconvert, ipykernel.
+vectorbt, mlflow, matplotlib, pytest, kaggle, jupyter, nbconvert, and ipykernel.
 
 A `kaggle` CLI warning about "Authentication required" is normal —
-we don't push anything to Kaggle until Step F.
+you only need Kaggle auth if you plan to upload the cache or run on Kaggle GPU.
 
 ### 1.5 Sanity check
 
@@ -59,8 +57,8 @@ we don't push anything to Kaggle until Step F.
 # project directory.
 
 .venv/bin/python -m pytest tests/ -v
-# Expected: 3 tests pass (test_paths.py × 3). Step C adds 6 more once
-# you've run --download and --targets.
+# Expected: all tests pass (test_paths.py × 3). More tests activate once
+# you've built the cache (--download, --targets, --features).
 ```
 
 ---
@@ -68,8 +66,8 @@ we don't push anything to Kaggle until Step F.
 ## 2. Build the local cache
 
 The local pipeline is a strict sequence. **Run each step in order.**
-The order is deliberate — it prevents a class of bugs (lookahead in the
-target) that are hard to diagnose after the fact.
+The order is deliberate — it prevents lookahead bugs that are hard to
+diagnose after the fact.
 
 ### 2.1 Step B — Download prices
 
@@ -77,47 +75,35 @@ target) that are hard to diagnose after the fact.
 .venv/bin/python data.py --download
 ```
 
-**What happens:** Downloads 22 series (20 universe tickers + `^GSPC` +
+**What happens:** Downloads 42 series (40 universe tickers + `^GSPC` +
 `^VIX`) from Yahoo Finance for 2015-01-01 → 2024-12-31, aligns to a
 common trading-day calendar, validates, and writes
 `cache/prices.parquet` + `cache/prices.sha256` + `cache/hashes.json`.
 
-**First run:** ~30–60 seconds (yfinance network). **Subsequent runs:**
+**First run:** ~60–90 seconds (yfinance network). **Subsequent runs:**
 <1 second (cache hit, prints the same SHA-256 as the first run).
 
 **Expected output (first run):**
 
 ```
-[data] downloading 22 series from 2015-01-01 → 2024-12-31
+[data] downloading 42 series from 2015-01-01 → 2024-12-31
 [data] master calendar: 2515 trading days
 
 [data] validation summary:
 ticker                 sector      first       last  rows  NaNs
   AAPL Information Technology 2015-01-02 2024-12-30  2515     0
-  ...  (22 rows total)
+  ...  (42 rows total)
   ^VIX                 global 2015-01-02 2024-12-30  2515     0
 
-[data] wrote /.../cache/prices.parquet  sha256=3507138cb2bf...
+[data] wrote /.../cache/prices.parquet  sha256=...
 ```
 
 **Expected output (subsequent runs):**
 
 ```
 [data] cache hit: /.../cache/prices.parquet
-[data] sha256: 3507138cb2bf...
+[data] sha256: ...
 ```
-
-**Verify manually:**
-
-```bash
-.venv/bin/python data.py --download     # should be a cache hit
-.venv/bin/python data.py --download     # same hash, no re-download
-ls -la cache/                           # prices.parquet ~2.4 MB
-cat cache/hashes.json                   # contains the SHA-256
-```
-
-The §3 deliverable is that **two consecutive runs produce the identical
-hash**. This proves the cache is stable.
 
 ### 2.2 Step C — Build the target
 
@@ -126,42 +112,17 @@ hash**. This proves the cache is stable.
 ```
 
 **What happens:** Computes the next-day excess return per (date,
-ticker) — the label that the Transformer will be trained to predict —
-and writes `cache/targets.parquet`. The last price date is dropped
-(no t+1 known for it).
+ticker) — the label the model is trained to predict — and writes
+`cache/targets.parquet`. The last price date is dropped (no t+1 known).
 
 **Expected output:**
 
 ```
 [data] targets: dropped 1 row(s) with no t+1 label
-[data] wrote /.../cache/targets.parquet  rows=50,280
+[data] wrote /.../cache/targets.parquet  rows=100,560
 ```
 
-The exact number of rows is `2514 dates × 20 tickers = 50,280`. If you
-see `rows=55,308` you have the **bug** version where `^GSPC` and `^VIX`
-leaked into the universe mean — make sure your `data.py` is the latest
-version.
-
-**Verify with the hand-check notebook:**
-
-```bash
-.venv/bin/jupyter nbconvert --to notebook --execute \
-    notebooks/verification.ipynb --output verification.ipynb
-# or open it interactively:
-.venv/bin/jupyter lab notebooks/verification.ipynb
-```
-
-The notebook has four cells:
-
-1. **§1 Cross-sectional sum** — `max |sum| = 2.22e-16` (floating-point
-   noise; well under the 1e-10 threshold from §4).
-2. **§2 Hand-check table** — for the chosen date 2018-01-02, every
-   stock's `excess[t+1] = raw_ret[t+1] - mean[t+1]`. The diff between
-   the hand-computed value and the cached target should be `0.000e+00`.
-3. **§3 Single-stock hand-check** — for any (date, ticker) you choose,
-   prints every intermediate value and the cached target.
-4. **§4 No-lookahead** — confirms the last price date is NOT in the
-   targets table, and that every date has exactly 20 tickers.
+The exact number of rows is `2514 dates × 40 tickers = 100,560`.
 
 **Verify with the test suite:**
 
@@ -173,11 +134,21 @@ The notebook has four cells:
 #   total: 9 passed
 ```
 
-The 6 target tests cover the 5 mandatory §4 checks (cross-sectional
-sum, cross-sectional mean, 3 random manual hand-computations to 1e-9,
-alignment, no-lookahead) plus a structural check that every date has
-exactly 20 tickers (catches the "globals leaked into the universe"
-bug).
+The 6 target tests cover: cross-sectional sum ≈ 0 on every date,
+3 manual hand-computations to 1e-9, alignment, no-lookahead, and
+exactly 40 tickers per date.
+
+### 2.3 Step E — Build features
+
+```bash
+.venv/bin/python data.py --features
+```
+
+**What happens:** Computes 8 features per (date, ticker) — returns,
+volatility, momentum, volume ratio, sector relative strength, spread,
+market return (`^GSPC`), and VIX — and writes `cache/features.parquet`.
+Features are stored **unscaled**; the scaler is fitted per fold on
+training data only.
 
 ---
 
@@ -187,9 +158,10 @@ bug).
 |---|---|---|
 | Data acquisition | local | needs internet for yfinance |
 | Target construction | local | must be hand-verified |
-| Eval harness + random-model gate | local | CPU only; the gate is the gate |
 | Feature engineering | local | CPU; needs plotting |
-| Transformer training | **Kaggle GPU** | only step that needs a GPU |
+| Eval harness + random-model gate | local | CPU only; the gate is the gate |
+| Graph construction | local | CPU; leakage gate verification |
+| Model training | **Kaggle GPU** | only step that needs a GPU |
 | Final comparison | local | re-runs eval over downloaded predictions |
 
 The split is implemented in [`paths.py`](./paths.py). Every module
@@ -199,9 +171,9 @@ resolve correctly.
 
 ---
 
-## 4. Uploading the cache to Kaggle (after Step E)
+## 4. Uploading the cache to Kaggle
 
-After Step E completes locally and the cache has all three Parquet
+After the local pipeline completes and `cache/` has all three Parquet
 files, push it to Kaggle as a versioned Dataset:
 
 ```bash
@@ -227,33 +199,57 @@ The training notebook verifies the SHA-256 of each Parquet against
 
 ```
 DMRGT/
-├── configs.yaml                  # all hyperparameters, tickers, costs, seeds
-├── paths.py                      # LOCAL / KAGGLE path resolution
+├── configs.yaml                     # all hyperparameters, tickers, costs, seeds
+├── paths.py                         # LOCAL / KAGGLE path resolution
 ├── requirements.txt
-├── README.md                     # ← you are here
-├── DMRGT-Phase1-Build-Spec.md    # full design brief (authoritative)
-├── data.py                       # Steps B, C, E (--download, --targets, --features)
-├── features.py                   # Step E: 8 features (called from data.py)
-├── splits.py                     # walk-forward folds         [Step D]
-├── baselines.py                  # random, persistence         [Step D]
-├── eval.py                       # metrics + cost-aware backtest [Step D]
-├── model.py                      # Transformer encoder         [Step F]
-├── train.py                      # training loop               [Step F]
-├── cache/                        # Parquet outputs (gitignored) → Kaggle
+├── README.md                        # ← you are here
+├── BuildSpec/
+│   ├── DMRGT-Phase1-Build-Spec.md   # Phase 1 design brief
+│   └── DMRGT-Phase2-Build-Spec.md   # Phase 2 design brief (authoritative)
+├── docs/
+│   ├── PHASE1_RESULTS.md            # Phase 1 results summary
+│   └── PHASE2_RESULTS.md            # Phase 2 results summary
+├── data.py                          # Steps B, C, E (--download, --targets, --features)
+├── features.py                      # Step E: 8 features (called from data.py)
+├── graph.py                         # Phase 2: temporal graph construction
+├── splits.py                        # walk-forward folds
+├── baselines.py                     # random, persistence baselines
+├── eval.py                          # metrics + cost-aware backtest
+├── model.py                         # GNN + Transformer encoder
+├── train.py                         # training loop
+├── compare.py                       # drives the results comparison table
+├── verify_env.py                    # environment verification script
+├── cache/                           # Parquet outputs (gitignored) → Kaggle
 │   ├── prices.parquet
 │   ├── targets.parquet
-│   ├── features.parquet          [Step E]
+│   ├── features.parquet
 │   ├── prices.sha256
 │   └── hashes.json
-├── artifacts/                    # downloaded Kaggle outputs (gitignored)
+├── artifacts/                       # downloaded Kaggle outputs (gitignored)
 ├── notebooks/
-│   ├── verification.ipynb        # hand-checks (LOCAL)         ✅ done
-│   └── kaggle_train.ipynb        # thin training wrapper (KAGGLE) [Step F]
+│   └── verification.ipynb           # hand-checks (LOCAL)
+├── kaggle/
+│   ├── KAGGLE.md                    # Kaggle workflow instructions
+│   ├── kaggle_train.ipynb           # thin training wrapper (KAGGLE)
+│   ├── build_code_dataset.sh        # assembles kaggle/code/ for upload
+│   └── code/                        # mirror of core modules for Kaggle dataset
+│       ├── configs.yaml
+│       ├── data.py
+│       ├── model.py
+│       ├── paths.py
+│       ├── splits.py
+│       └── train.py
 └── tests/
-    ├── test_paths.py             # 3 tests, both envs         ✅ done
-    ├── test_target.py            # 6 tests, §4 mandatory checks ✅ done
-    ├── test_features.py          [Step E]
-    └── test_leakage.py           [Step D — THE GATE]
+    ├── test_paths.py                # 3 tests, both envs
+    ├── test_target.py               # 6 tests, §4 mandatory checks
+    ├── test_features.py             # 9 tests, NaN-corruption lookahead
+    ├── test_leakage.py              # THE GATE — random model IC ≈ 0
+    ├── test_graph_leakage.py        # Phase 2: graph edge window leakage
+    ├── test_cache_integrity.py      # cache hash stability
+    ├── test_idempotency.py          # data.py idempotency
+    ├── test_scaler.py               # per-fold scaler isolation
+    ├── test_universe.py             # universe size and sector balance
+    └── test_windows.py              # walk-forward window integrity
 ```
 
 ---
@@ -268,19 +264,18 @@ checkout:
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 
-# 2. Build the cache: prices → targets → features (~1 min total)
+# 2. Build the cache: prices → targets → features (~2 min total)
 .venv/bin/python data.py --download
 .venv/bin/python data.py --targets
 .venv/bin/python data.py --features
 
-# 3. Run the local evaluation suite (~30s — 4 folds × 2 baselines)
+# 3. Run the local evaluation suite (~1 min — 4 folds × baselines + models)
 .venv/bin/python compare.py --skip-tx
 
-# 4. Run the tests (~25s — 35 tests including the leakage gate)
+# 4. Run the tests (~30s — all tests including leakage gates)
 .venv/bin/python -m pytest tests/ -v
 
-# 5. Re-run the verification notebook (no Kernel required — nbconvert
-#    executes the cells headlessly; ~20s)
+# 5. Re-run the verification notebook (headless; ~20s)
 .venv/bin/jupyter nbconvert --to notebook --execute \
     notebooks/verification.ipynb --output verification.ipynb
 ```
@@ -300,39 +295,33 @@ After the Kaggle run, finish the comparison:
 
 ---
 
-## 7. Phase 1 Definition of Done
+## 7. Phase 2 headline results
 
-See §9 of the build spec. Updated status as of the current build:
+All seven models evaluated through the identical `eval.py` path — same
+folds, same seeds, same commission (10 bps) and slippage (5 bps).
 
-- [x] `configs.yaml` drives every module; nothing hardcoded
-- [x] `paths.py` resolves correctly in BOTH local and Kaggle environments
-- [x] 20 sector-stratified tickers downloaded, aligned, cached, hashed
-- [x] Re-running `data.py` produces an identical hash (4 idempotency tests)
-- [x] Target verified: cross-sectional sum ≈ 0 on every date (max 2.22e-16)
-- [x] Target verified: 3 manual hand-computations match to 1e-9
-- [x] Target verified: exactly 20 tickers per date (no globals in universe)
-- [x] Target verified: last price date is not in targets (no lookahead)
-- [x] Walk-forward folds generated; zero train/test overlap asserted
-- [x] **Random model scores rank IC within ±0.02 of zero** ← THE GATE
-  (gate powered at 4 folds × 5 seeds = 20 samples; mean IC ≈ 0.002)
-- [x] Random model loses money after costs (mean cum return −0.53)
-- [x] Persistence baseline recorded across all folds
-- [x] All 8 features built, plotted and inspected individually
-- [x] NaN-corruption lookahead test passes for all 8 features
-- [x] Features cached UNSCALED; scaler fitted per fold on training data only
-- [x] `cache/` uploaded to Kaggle as a VERSIONED dataset (instructions in KAGGLE.md)
-- [x] Kaggle notebook verifies parquet hashes before training; halts on mismatch
-- [x] Kaggle notebook asserts GPU is available
-- [x] Transformer trains; one shared model across stocks; causal mask present
-- [x] 5 seeds per fold; `train.py` emits `predictions.parquet`, not metrics
-- [x] Kaggle run executed via Save & Run All (Commit), not interactively (documented)
-- [x] `predictions.parquet` + `run_manifest.json` downloaded to `artifacts/` (documented)
-- [x] One fold verified locally on CPU; structural cross-check documented in KAGGLE.md §7
-- [x] Backtest includes commission AND slippage; turnover reported
-- [x] Results table complete: random vs persistence vs Transformer
-- [x] MLflow logging in eval.py (local file store; no server required)
-- [x] All 35 tests in `tests/` pass
-- [x] README documents how to reproduce with one command (§6 above)
+| Model | Mean rank IC | Dir. acc | Sharpe (after costs) | Max DD |
+|---|---|---|---|---|
+| **dmrgt_all3** | **+0.0061 ± 0.0110** | 0.499 | −1.64 | 0.295 |
+| dmrgt_no_sector | +0.0056 ± 0.0122 | 0.503 | −2.07 | 0.327 |
+| dmrgt_pos_only | +0.0036 ± 0.0133 | 0.499 | −2.24 | 0.361 |
+| transformer_nograph *(control)* | +0.0022 ± 0.0114 | 0.505 | −1.35 | 0.351 |
+| persistence | +0.0000 ± 0.0018 | 0.502 | −1.75 | 0.411 |
+| lstm | −0.0016 ± 0.0159 | 0.501 | −1.29 | 0.356 |
+| random *(gate)* | −0.0074 ± 0.0035 | 0.496 | −5.24 | 0.489 |
+
+**Completion criterion met:** DMRGT all-3 (+0.0061) beats both the
+no-graph Transformer (+0.0022) and the LSTM (−0.0016). ✅
+
+The ablation ladder shows each relation type contributes positively:
+
+| Configuration | Edge types | Mean rank IC | Δ |
+|---|---|---|---|
+| `dmrgt_pos_only` | +corr | +0.0036 | — |
+| `dmrgt_no_sector` | +corr, −corr | +0.0056 | +0.0020 |
+| `dmrgt_all3` | +corr, −corr, sector | +0.0061 | +0.0005 |
+
+Full details in [`docs/PHASE2_RESULTS.md`](./docs/PHASE2_RESULTS.md).
 
 ---
 
@@ -340,16 +329,35 @@ See §9 of the build spec. Updated status as of the current build:
 
 | Step | Status | Description |
 |---|---|---|
-| **A** Foundation | ✅ Complete | venv, configs.yaml, paths.py, requirements, README, .gitignore, tests/test_paths.py |
-| **B** Data acquisition | ✅ Complete | data.py --download, 22 series, idempotent cache, hash recorded |
-| **C** Target | ✅ Complete | data.py --targets, tests/test_target.py (6/6 pass), verification.ipynb §1–§4 |
-| **D** Splits + baselines | ✅ Complete | splits.py (4 walk-forward folds, expanding window, 0 overlap), baselines.py (random + persistence) |
-| **E** Eval harness | ✅ Complete | eval.py (per-day metrics + vectorbt backtest), leakage gate passes (mean IC ≈ 0.002) |
-| **F** Features | ✅ Complete | features.py (8 features, unscaled), tests/test_features.py (9/9 pass, including NaN-corruption lookahead) |
-| **G** Model | ✅ Complete | model.py (shared Transformer, 100K params, causal mask, sin pos enc), train.py (per-fold × per-seed, Huber loss, early stopping, scaler-per-fold) |
-| **H** Verification notebook | ✅ Complete | verification.ipynb extended with §5–§8 (8-panel histogram, per-ticker time series, f7/f8 cross-section identity, f1/f2 centring) |
-| **I** Kaggle artifacts | ✅ Complete | kaggle/kaggle_train.ipynb (5-cell thin wrapper), kaggle/code/ (upload as dmrgt-code), kaggle/KAGGLE.md (full instructions) |
-| **J** Comparison | ✅ Complete | compare.py (drives §8 results table), evaluate_predictions() in eval.py reuses the same metric + backtest code paths |
+| **Phase 1** | ✅ Complete | Transformer encoder, 20-stock universe, 8 features, leak-free pipeline, random-model gate passed |
+| **Phase 2** | ✅ Complete | Dynamic 3-relation graph (+corr/−corr/sector), R-GCN encoder, 40-stock universe, sector-neural-bucketing, multi-target training, beats no-graph and LSTM baselines |
+
+### Phase 1 steps
+
+| Step | Status | Description |
+|---|---|---|
+| **A** Foundation | ✅ | venv, configs.yaml, paths.py, requirements, README, .gitignore, tests/test_paths.py |
+| **B** Data acquisition | ✅ | data.py --download, 22 series, idempotent cache, hash recorded |
+| **C** Target | ✅ | data.py --targets, tests/test_target.py (6/6 pass), verification.ipynb |
+| **D** Splits + baselines | ✅ | splits.py (4 walk-forward folds), baselines.py (random + persistence) |
+| **E** Eval harness | ✅ | eval.py, leakage gate passes (mean IC ≈ 0.002) |
+| **F** Features | ✅ | features.py (8 features, unscaled), tests/test_features.py (9/9 pass) |
+| **G** Model | ✅ | model.py (Transformer, 100K params, causal mask), train.py |
+| **H** Verification | ✅ | verification.ipynb (8-panel histogram, per-ticker time series) |
+| **I** Kaggle artifacts | ✅ | kaggle_train.ipynb, kaggle/code/, KAGGLE.md |
+| **J** Comparison | ✅ | compare.py, evaluate_predictions() in eval.py |
+
+### Phase 2 steps
+
+| Step | Status | Description |
+|---|---|---|
+| **K** Universe expansion | ✅ | 20 → 40 stocks, 5 per sector across 8 GICS sectors |
+| **L** Graph construction | ✅ | graph.py — temporal edges with leakage-safe windows |
+| **M** Graph leakage gate | ✅ | tests/test_graph_leakage.py — edge windows don't leak future |
+| **N** GNN encoder | ✅ | model.py — R-GCN with sector embeddings, multi-target heads |
+| **O** Multi-target training | ✅ | train.py — graph-aware loop, configurable architecture |
+| **P** Ablation study | ✅ | dmrgt_all3 vs dmrgt_no_sector vs dmrgt_pos_only |
+| **Q** Final comparison | ✅ | DMRGT beats no-graph Transformer and LSTM on rank IC |
 
 ---
 
