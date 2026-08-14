@@ -170,13 +170,13 @@ def test_no_lookahead_last_date_dropped(targets: pd.DataFrame, prices: pd.DataFr
     )
 
 
-# ── Test 6 — exactly 20 tickers per date (not 22, which would mean
+# ── Test 6 — exactly 40 tickers per date (not 22, which would mean
 #            ^GSPC and ^VIX leaked into the universe mean) ─────────────
 
 def test_exactly_20_tickers_per_date(targets: pd.DataFrame) -> None:
     counts = targets.groupby("date").size()
-    assert (counts == 20).all(), (
-        f"Some dates don't have exactly 20 tickers. "
+    assert (counts == 40).all(), (
+        f"Some dates don't have exactly 40 tickers. "
         f"min={counts.min()}, max={counts.max()}, "
         f"unique={counts.unique()}"
     )

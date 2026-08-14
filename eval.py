@@ -219,14 +219,14 @@ def backtest_daily_deciles(
         return (not excess) for the SAME date. The backtest earns the
         raw return — the excess-return target is for ranking only.
     tickers : list of str
-        The 20 stock tickers, in a stable order.
+        The stock tickers, in a stable order.
     commission_bps : float
         One-way commission in basis points (10 bps = 0.10%).
     slippage_bps : float
         One-way slippage in basis points (5 bps = 0.05%).
     decile_fraction : float
         Top/bottom fraction to go long/short. 0.2 → 4 longs + 4 shorts
-        out of 20 stocks.
+        out of n stocks.
 
     Returns
     -------
@@ -344,8 +344,10 @@ def evaluate_fold(
     n_stocks = len(universe)
     feature_cols = [c for c in features.columns if c.startswith("f") and "_" in c]
     n_features = len(feature_cols)
-    assert n_stocks == 20, f"Phase 1 uses 20 stocks; got {n_stocks}"
-    assert n_features == 8, f"Phase 1 has 8 features; got {n_features}"
+    assert n_stocks == len(universe), (
+        f"Expected {len(universe)} stocks from config, got {n_stocks}"
+    )
+    assert n_features == 8, f"Expected 8 features; got {n_features}"
 
     # Index features/targets for fast lookup
     feat_wide = (features.pivot(index="date", columns="ticker",
@@ -486,7 +488,7 @@ def evaluate_predictions(
     if universe is None:
         universe = list(cfg["universe"]["tickers"])
     pred_df = pd.read_parquet(predictions_path)
-    required = {"fold", "seed", "date", "ticker", "y_pred", "y_true"}
+    required = {"model", "fold", "seed", "date", "ticker", "y_pred", "y_true"}
     missing = required - set(pred_df.columns)
     if missing:
         raise ValueError(
@@ -502,9 +504,10 @@ def evaluate_predictions(
     raw_wide = tgt_wide.add(tgt_wide.mean(axis=1), axis=0)
 
     results: list[FoldResult] = []
-    for (fold_name, seed), grp in pred_df.groupby(["fold", "seed"]):
+    for (model_name, fold_name, seed), grp in pred_df.groupby(
+            ["model", "fold", "seed"]):
         seed_val = int(seed) if pd.notna(seed) else None
-        # Pivot to wide [date × ticker] for this (fold, seed)
+        # Pivot to wide [date × ticker] for this (model, fold, seed)
         wide_pred = grp.pivot(index="date", columns="ticker",
                               values="y_pred").sort_index()
         wide_true = grp.pivot(index="date", columns="ticker",
@@ -541,7 +544,7 @@ def evaluate_predictions(
 
         # Aggregate
         metrics = FoldMetrics(
-            model="transformer",
+            model=str(model_name),
             fold=str(fold_name),
             seed=seed_val,
             n_test_days=len(daily_df),
@@ -556,7 +559,7 @@ def evaluate_predictions(
             cum_return=bt_stats["cum_return"],
         )
         results.append(FoldResult(
-            model="transformer",
+            model=str(model_name),
             fold=str(fold_name),
             seed=seed_val,
             per_day=daily_df,

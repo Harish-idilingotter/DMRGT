@@ -93,7 +93,7 @@ def _f6_vol_zscore(volume: pd.Series, window: int = 60) -> pd.Series:
 
 
 def _f7_market_ret(spx_close: pd.Series) -> pd.Series:
-    """Feature 7 — log-return of ^GSPC. Identical for all 20 tickers
+    """Feature 7 — log-return of ^GSPC. Identical for all universe tickers
     on a given date because it is computed from a single global series
     and broadcast at the merge step.
     """
@@ -101,7 +101,7 @@ def _f7_market_ret(spx_close: pd.Series) -> pd.Series:
 
 
 def _f8_vix(vix_close: pd.Series) -> pd.Series:
-    """Feature 8 — VIX level, broadcast identically to all 20 tickers.
+    """Feature 8 — VIX level, broadcast identically to all universe tickers.
     NOT a return — the spec explicitly says 'VIX close level'."""
     return vix_close
 
@@ -127,7 +127,7 @@ def build_features(prices: pd.DataFrame, cfg: dict) -> pd.DataFrame:
                               values=col).sort_index()
             for col in needed}
 
-    # Only compute per-stock features for the 20 tickers (skip ^GSPC,
+    # Only compute per-stock features for the universe tickers (skip ^GSPC,
     # ^VIX — they are handled as global features below).
     stock_close = wide["close"][universe]
     stock_high = wide["high"][universe]

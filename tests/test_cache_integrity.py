@@ -37,6 +37,7 @@ EXPECTED_PARQUETS = [
     "prices.parquet",
     "features.parquet",
     "targets.parquet",
+    "graphs.parquet",
 ]
 
 
@@ -55,7 +56,7 @@ def test_hashes_json_covers_every_parquet():
     assert paths.HASHES_JSON.exists()
     hashes = json.loads(paths.HASHES_JSON.read_text())
     missing = []
-    for p in [paths.PRICES, paths.FEATURES, paths.TARGETS]:
+    for p in [paths.PRICES, paths.FEATURES, paths.TARGETS, paths.GRAPHS]:
         if p.exists() and p.name not in hashes:
             missing.append(p.name)
     assert not missing, (

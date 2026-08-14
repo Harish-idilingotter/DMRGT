@@ -1,8 +1,10 @@
-"""Local-vs-Kaggle structural cross-check.
+"""Local-vs-Kaggle structural cross-check (Phase 2).
 
 Confirms both environments read the same data and construct the same folds.
 Does NOT compare losses or rank IC — those depend on training duration and
 numerical kernels, not on environment.
+
+Phase 2 additions: 4 parquet hashes, edge count, date-range intersection.
 """
 
 from __future__ import annotations
@@ -57,13 +59,43 @@ def build_report(fold_idx: int, seed: int, cfg: dict) -> dict:
         )
     fold = folds[fold_idx]
 
-    tensors = train.assemble_fold(fold, features, targets, cfg)
+    # Load graphs if available
+    graphs = None
+    if paths.GRAPHS.exists():
+        graphs = pd.read_parquet(paths.GRAPHS)
+
+    tensors = train.assemble_fold(fold, features, targets, cfg, graphs)
 
     train_first, train_last = _date_span(tensors.train_dates if hasattr(tensors, "train_dates")
                                           else np.array([fold.train_dates[0], fold.train_dates[-1]]))
     test_first, test_last = _date_span(tensors.test_dates)
 
     universe = list(cfg["universe"]["tickers"])
+
+    # ── parquet hashes (4 files in Phase 2) ──────────────────────────
+    parquet_hashes = {
+        "prices.parquet":   _sha256_of_file(paths.PRICES),
+        "features.parquet": _sha256_of_file(paths.FEATURES),
+        "targets.parquet":  _sha256_of_file(paths.TARGETS),
+    }
+    if paths.GRAPHS.exists():
+        parquet_hashes["graphs.parquet"] = _sha256_of_file(paths.GRAPHS)
+
+    # ── edge count for first test date ───────────────────────────────
+    edge_count = None
+    if graphs is not None and len(tensors.test_dates) > 0:
+        first_test = pd.Timestamp(tensors.test_dates[0])
+        day_graph = graphs[graphs["date"] == first_test]
+        edge_count = len(day_graph)
+
+    # ── date-range intersection ──────────────────────────────────────
+    n_features_dates = features["date"].nunique()
+    n_graph_dates = graphs["date"].nunique() if graphs is not None else 0
+    intersection_size = None
+    if graphs is not None:
+        feat_dates = set(features["date"].unique())
+        graph_dates = set(graphs["date"].unique())
+        intersection_size = len(feat_dates & graph_dates)
 
     return {
         "fold_name": fold.name,
@@ -79,11 +111,11 @@ def build_report(fold_idx: int, seed: int, cfg: dict) -> dict:
         "test_last_date":   test_last,
         "tickers": sorted(tensors.test_tickers),
         "tickers_count": len(tensors.test_tickers),
-        "parquet_hashes": {
-            "prices.parquet":   _sha256_of_file(paths.PRICES),
-            "features.parquet": _sha256_of_file(paths.FEATURES),
-            "targets.parquet":  _sha256_of_file(paths.TARGETS),
-        },
+        "parquet_hashes": parquet_hashes,
+        "edge_count_first_test_date": edge_count,
+        "n_features_dates": n_features_dates,
+        "n_graph_dates": n_graph_dates,
+        "date_intersection_size": intersection_size,
         # NOTE: not reported — depends on training duration
         # "validation_loss": ...,
         # "rank_ic_mean":    ...,
@@ -188,7 +220,7 @@ def _emit_compare_summary(failures: list[str]) -> bool:
 
 def print_report(report: dict) -> None:
     print("=" * 70)
-    print(f"DMRGT Phase 1 — local structural report (KAGGLE.md §7)")
+    print(f"DMRGT Phase 2 — local structural report (KAGGLE.md §7)")
     print("=" * 70)
     print(f"  fold:                {report['fold_name']!r}  (idx={report['fold_idx']})")
     print(f"  seed:                {report['seed']}")
@@ -204,6 +236,15 @@ def print_report(report: dict) -> None:
     print("  parquet hashes:")
     for name, h in report["parquet_hashes"].items():
         print(f"    {name:22s}  sha256={h}")
+    print()
+    if report.get("edge_count_first_test_date") is not None:
+        print(f"  edge count (first test date): {report['edge_count_first_test_date']}")
+    if report.get("n_features_dates") is not None:
+        print(f"  features dates:     {report['n_features_dates']}")
+    if report.get("n_graph_dates") is not None:
+        print(f"  graph dates:        {report['n_graph_dates']}")
+    if report.get("date_intersection_size") is not None:
+        print(f"  date intersection:  {report['date_intersection_size']}")
     print()
     print("  Excluded from comparison (depend on training duration /")
     print("  numerical kernels, not on environment):")

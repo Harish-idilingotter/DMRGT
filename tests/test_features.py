@@ -81,7 +81,7 @@ def test_atr_strictly_positive(features: pd.DataFrame) -> None:
 def test_f7_f8_identical_per_date(features: pd.DataFrame) -> None:
     f7_std = features.groupby("date")["f7_market_ret"].std()
     f8_std = features.groupby("date")["f8_vix"].std()
-    # Spec: "Identical value for all 20 tickers on a given date".
+    # Spec: "Identical value for all 40 tickers on a given date".
     # The cross-sectional std must be 0 (up to float epsilon).
     eps = 1e-12
     assert (f7_std < eps).all(), (
@@ -196,11 +196,11 @@ def test_f6_centred_and_skewed(features: pd.DataFrame) -> None:
     )
 
 
-# ── 9. Exactly 20 tickers per date ────────────────────────────────────────
+# ── 9. Exactly 40 tickers per date ────────────────────────────────────────
 
 def test_exactly_20_tickers_per_date(features: pd.DataFrame) -> None:
     counts = features.groupby("date").size()
-    assert (counts == 20).all(), (
-        f"Some dates don't have exactly 20 tickers: "
+    assert (counts == 40).all(), (
+        f"Some dates don't have exactly 40 tickers: "
         f"min={counts.min()}, max={counts.max()}"
     )

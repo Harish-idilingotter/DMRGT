@@ -61,6 +61,7 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 PRICES: Path = CACHE_DIR / "prices.parquet"
 FEATURES: Path = CACHE_DIR / "features.parquet"
 TARGETS: Path = CACHE_DIR / "targets.parquet"
+GRAPHS: Path = CACHE_DIR / "graphs.parquet"
 HASHES_JSON: Path = CACHE_DIR / "hashes.json"
 CONFIG: Path = CODE_DIR / "configs.yaml"
 
@@ -70,12 +71,15 @@ TRAIN_METRICS: Path = OUTPUT_DIR / "train_metrics.json"
 RUN_MANIFEST: Path = OUTPUT_DIR / "run_manifest.json"
 CHECKPOINTS_DIR: Path = OUTPUT_DIR / "checkpoints"
 
-# The three data files whose hashes are verified. Single source of
+# The four data files whose hashes are verified. Single source of
 # truth — used by train.py and the notebook so they cannot disagree.
+# The counting guard in verify_cache_hashes iterates this tuple, so
+# adding a file here automatically extends the hash check.
 CACHE_PARQUETS: tuple[str, ...] = (
     "prices.parquet",
     "features.parquet",
     "targets.parquet",
+    "graphs.parquet",
 )
 
 
@@ -94,6 +98,7 @@ def describe() -> dict:
         "prices_exists":   PRICES.exists(),
         "features_exists": FEATURES.exists(),
         "targets_exists":  TARGETS.exists(),
+        "graphs_exists":   GRAPHS.exists(),
         "hashes_exists":   HASHES_JSON.exists(),
     }
 

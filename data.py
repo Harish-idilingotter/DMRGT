@@ -73,7 +73,7 @@ def update_hashes(hashes_path: Path,
     from datetime import datetime, timezone
 
     if parquet_paths is None:
-        parquet_paths = [paths.PRICES, paths.FEATURES, paths.TARGETS]
+        parquet_paths = [paths.PRICES, paths.FEATURES, paths.TARGETS, paths.GRAPHS]
 
     hashes = _read_hashes(hashes_path)
     for p in parquet_paths:
@@ -94,7 +94,7 @@ def _verify_hashes_complete(hashes_path: Path) -> None:
     import json
     hashes = json.loads(hashes_path.read_text())
     missing = []
-    for p in [paths.PRICES, paths.FEATURES, paths.TARGETS]:
+    for p in [paths.PRICES, paths.FEATURES, paths.TARGETS, paths.GRAPHS]:
         if p.exists() and p.name not in hashes:
             missing.append(p.name)
     assert not missing, (
@@ -248,8 +248,31 @@ def download_prices(cfg: dict) -> pd.DataFrame:
     return aligned
 
 
-def _sector_lookup(_cfg: dict) -> dict[str, str]:  # noqa: ARG001
-    """Map ticker → GICS sector."""
+def _sector_lookup(cfg: dict) -> dict[str, str]:
+    """Map ticker → GICS sector. Reads from configs.yaml sectors: block
+    so there is one source of truth shared with graph.py."""
+    sectors_cfg = cfg.get("sectors", {})
+    if sectors_cfg:
+        # Validate: every universe ticker must have a sector entry
+        universe = list(cfg["universe"]["tickers"])
+        missing = [t for t in universe if t not in sectors_cfg]
+        if missing:
+            raise ValueError(
+                f"configs.yaml sectors: block missing entries for: {missing}"
+            )
+        # Validate: no sector holds more than 20% of the universe (§3.1)
+        from collections import Counter
+        counts = Counter(sectors_cfg[t] for t in universe)
+        n = len(universe)
+        for sector, count in counts.items():
+            pct = count / n
+            if pct > 0.20:
+                raise ValueError(
+                    f"Sector {sector!r} holds {pct:.1%} of the universe "
+                    f"({count}/{n}), exceeding the 20% limit (§3.1)."
+                )
+        return dict(sectors_cfg)
+    # Fallback for Phase 1 compatibility (should not be hit in Phase 2)
     return {
         "AAPL": "Information Technology", "MSFT": "Information Technology",
         "JPM":  "Financials",             "BRK-B": "Financials", "GS": "Financials",

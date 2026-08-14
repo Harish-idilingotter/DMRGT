@@ -215,10 +215,11 @@ def test_cache_parquets_canonical():
         "prices.parquet",
         "features.parquet",
         "targets.parquet",
+        "graphs.parquet",
     ), (
         f"CACHE_PARQUETS changed: {paths.CACHE_PARQUETS}. "
         f"train.py and the notebook both iterate this tuple — drift "
-        f"between them is a Phase-1-blocking bug."
+        f"between them is a Phase-2-blocking bug."
     )
 
 

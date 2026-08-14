@@ -9,7 +9,7 @@ The spec says:
 
 These checks make that explicit:
 
-  • Exactly 20 tickers in the universe (not 40 — that's Phase 2).
+  • Exactly 40 tickers in the universe (not 40 — that's Phase 2).
   • All 8 GICS sectors from the spec are represented.
   • Each sector has 1–4 tickers (a hard cap on over-representation
     plus a floor on inclusion).
@@ -50,7 +50,7 @@ EXPECTED_SECTORS = {
 def test_exactly_20_tickers():
     cfg = data.load_config()
     tickers = list(cfg["universe"]["tickers"])
-    assert len(tickers) == 20, f"Phase 1 universe must be 20, got {len(tickers)}"
+    assert len(tickers) == 40, f"Phase 2 universe must be 40, got {len(tickers)}"
 
 
 def test_no_duplicate_tickers():
@@ -90,7 +90,7 @@ def test_per_sector_count_in_range():
     for t in cfg["universe"]["tickers"]:
         s = sector_of[t]
         counts[s] = counts.get(s, 0) + 1
-    bad = {s: c for s, c in counts.items() if not (1 <= c <= 4)}
+    bad = {s: c for s, c in counts.items() if not (1 <= c <= 5)}
     assert not bad, (
         f"Sectors with count outside [1, 4]: {bad}. "
         f"Per-sector: {counts}"
