@@ -32,7 +32,7 @@ def load_config(path: str = "configs.yaml") -> dict:
 
 
 def all_tickers(cfg: dict) -> list[str]:
-    """The 20 universe tickers plus the 2 global series."""
+    """Universe tickers plus the global series (^GSPC, ^VIX)."""
     return list(cfg["universe"]["tickers"]) + list(cfg["universe"]["global_series"])
 
 
@@ -291,7 +291,7 @@ def _sector_lookup(cfg: dict) -> dict[str, str]:
 def build_targets(prices: pd.DataFrame, cfg: dict | None = None) -> pd.DataFrame:
     """Next-day excess return: daily_return[t+1] - cross_sectional_mean[t+1].
     Label at date t describes what happens on t+1. Final row dropped."""
-    # Resolve which tickers belong to the universe (20) vs the global
+    # Resolve which tickers belong to the universe vs the global
     # series (^GSPC, ^VIX). When cfg is provided we use the configured
     # ticker list; otherwise we infer "global" by the leading caret.
     if cfg is not None:

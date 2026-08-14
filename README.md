@@ -275,9 +275,8 @@ python3 -m venv .venv
 # 4. Run the tests (~30s — all tests including leakage gates)
 .venv/bin/python -m pytest tests/ -v
 
-# 5. Re-run the verification notebook (headless; ~20s)
-.venv/bin/jupyter nbconvert --to notebook --execute \
-    notebooks/verification.ipynb --output verification.ipynb
+# 5. Verify the cache is valid (row counts, hashes, cross-sectional sum)
+.venv/bin/python verify_env.py
 ```
 
 The Kaggle half is documented in [`kaggle/KAGGLE.md`](kaggle/KAGGLE.md).

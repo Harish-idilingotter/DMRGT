@@ -239,7 +239,7 @@ def backtest_daily_deciles(
     rets = true_returns_by_day[tickers]
 
     n = len(tickers)
-    k = max(1, int(round(n * decile_fraction)))  # 4 for n=20, f=0.2
+    k = max(1, int(round(n * decile_fraction)))  # e.g. 8 for n=40, f=0.2
 
     # ── build the long/short signals ─────────────────────────────────
     # rank along the cross-section (axis=1) — rank 0..n-1.
