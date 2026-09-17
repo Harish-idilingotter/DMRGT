@@ -1,25 +1,16 @@
-# DMRGT Phase 2 — single source of truth for all hyperparameters, tickers,
-# costs, seeds, fold boundaries, graph parameters, and model identifiers.
-# Every module reads from this file. Nothing in script code may hardcode a
-# value that also lives here.
+# DMRGT Phase 3 — single source of truth for universe, features, folds,
+# costs, seeds, model IDs, graph parameters, tuning grids, and significance
+# thresholds. Every module reads from this file; nothing that lives here
+# may be hardcoded in script code.
+#
+# The universe / features / folds / cost blocks are IDENTICAL IN VALUE to
+# Phase 2's configs.yaml — the cache was built against them and the hash
+# check in train.py fails if they drift. Do not "improve" them.
 
 # ─── Universe ──────────────────────────────────────────────────────────────
-# 40 liquid S&P 100 constituents stratified across the 8 GICS sectors,
-# 5 per sector. Sector diversity matters because Phase 2 adds sector edges
-# and negative-correlation edges, both of which need cross-sector variety
-# to be meaningful.
-#
-# Sector mapping (per GICS):
-#   Information Technology        — AAPL, MSFT, NVDA, AVGO, CRM
-#   Financials                    — JPM, BRK-B, GS, BAC, V
-#   Health Care                   — JNJ, PFE, UNH, ABBV, MRK
-#   Energy                       — XOM, CVX, COP, SLB, EOG
-#   Consumer Discretionary       — AMZN, HD, NKE, TSLA, SBUX
-#   Consumer Staples             — PG, KO, WMT, COST, PEP
-#   Industrials                  — HON, CAT, BA, UPS, UNP
-#   Utilities                    — NEE, DUK, SO, AEP, EXC
-# Plus the two global series (^GSPC, ^VIX) — applied identically to every
-# stock on a given date and used as features 7 and 8.
+# 40 liquid S&P 100 constituents stratified across 8 GICS sectors,
+# 5 per sector, plus the two global series (^GSPC, ^VIX) applied
+# identically to every stock on a given date (features 7 and 8).
 universe:
   tickers:
     # Information Technology (5)
@@ -77,9 +68,8 @@ universe:
   end_date:   "2024-12-31"
 
 # ─── Sectors ───────────────────────────────────────────────────────────────
-# Single source of truth for GICS sector labels. Used by data.py for
-# validation and by graph.py for sector-edge construction. Every universe
-# ticker must appear here; global series are tagged "global".
+# GICS sector labels, shared by graph.py's sector-edge construction.
+# Every universe ticker must appear here; global series are "global".
 sectors:
   # Information Technology
   AAPL:  "Information Technology"
@@ -134,45 +124,39 @@ sectors:
   ^VIX:  "global"
 
 # ─── Features ──────────────────────────────────────────────────────────────
-# Computed locally in features.py. Lookback days determines the temporal
-# input dimension [n_stocks, lookback_days, 8].
-#
-# `columns` is the EXPLICIT list of feature columns that will be loaded
-# by train.assemble_fold(). It must agree with FEATURE_COLUMNS in
-# features.py — never infer the schema by string-matching the parquet
-# columns, because a future rename would silently select nothing.
+# Cached in features.parquet, UNSCALED. `columns` is the explicit list
+# loaded by train.assemble_fold() — never infer the schema by
+# string-matching parquet columns.
 features:
   lookback_days: 30
-  rsi_period: 14
-  atr_period: 14
-  ma_period: 10
-  volume_zscore_window: 60
   columns: [f1_logret, f2_price_ma, f3_rsi, f4_macd, f5_atr,
             f6_vol_zscore, f7_market_ret, f8_vix]
   # f1 log-return, f2 price/10d MA, f3 RSI(14), f4 MACD,
   # f5 ATR(14), f6 volume z-score, f7 market return, f8 VIX
 
 # ─── Graph ─────────────────────────────────────────────────────────────────
-# Every graph parameter is config-driven, not hardcoded. Phase 4's
-# sensitivity grid varies k_pos, k_neg, and corr_window — hardcoding
-# now means rewriting graph.py in September.
+# Baseline configuration (Phase 2's choice). §6b's sensitivity grid tests
+# this choice; if a different configuration wins the grid, THIS block is
+# updated to the winner and both cache/graphs.parquet and
+# cache/graphs_frozen.parquet are rebuilt at it (Rule 22 / §6b.5).
 graph:
   corr_window: 60           # trailing days of returns per correlation
-  corr_method: pearson      # pearson | spearman
+  corr_method: pearson      # pearson | spearman — pearson built the cache
   k_pos: 8                  # top-k positive edges per stock
   k_neg: 4                  # bottom-k negative edges per stock
-  symmetrise: false         # directed — preserves top-k selection asymmetry
+  symmetrise: false         # directed — preserves top-k asymmetry (Rule 12)
   include_sector: true
-  min_history_days: 61      # corr_window + 1 (need 61 prices for 60 returns)
+  min_history_days: 61      # corr_window + 1 (61 prices → 60 returns)
 
 # ─── Models ────────────────────────────────────────────────────────────────
-# Canonical model identifiers — referenced by train.py and the `model`
-# column in predictions.parquet. Never hand-typed elsewhere.
+# Phase 3 trains exactly these two (Rule 20). Same DMRGT class, same
+# hyperparameters — they differ ONLY in which edge table train.py joins
+# in: dynamic daily edges (graphs.parquet) vs frozen per-fold edges
+# (graphs_frozen.parquet).
 models:
-  ids: [lstm, transformer_nograph, dmrgt_pos_only, dmrgt_no_sector, dmrgt_all3]
+  ids: [dmrgt_all3, dmrgt_frozen]
 
 # ─── Training ──────────────────────────────────────────────────────────────
-# 5 seeds, as per §11 of the spec ("Seeds: ≥ 5 per configuration").
 training:
   seeds: [0, 1, 2, 3, 4]
   batch_size: 32
@@ -182,18 +166,47 @@ training:
   early_stopping_patience: 10
 
 # ─── Backtest / cost model ────────────────────────────────────────────────
-# Costs are active from the very first backtest run (§1.5). Reporting a
-# cost-free number at any point is a violation.
+# Costs are active from the first backtest run (Rule 5) and NEVER change
+# between the two arms (Rule 19). The decile_fraction below is the FINAL
+# post-processing configuration, declared in advance: the single-session
+# rework (§0) has NO post-processing tuning stage — the only configuration
+# search is the graph grid below.
 backtest:
   commission_bps: 10     # 0.10% per trade
   slippage_bps: 5        # 0.05%
-  decile_fraction: 0.2   # top/bottom 20% for 40 stocks = 8 each
+  decile_fraction: 0.2   # the book's size — final, not searched
+
+# ─── (Post-processing tuning grid REMOVED — single-session rework) ────────
+# The 36-config Tier 1 search (no_trade_band × decile_fraction ×
+# smoothing_days) was dropped when the pipeline moved to one committed
+# Kaggle session: identity post-processing (band 0, decile 0.2, smoothing
+# 1) is applied IDENTICALLY to both arms, declared in advance (Rule 19).
+# Rules 17/18 hold trivially — no post-processing decision is made at
+# all, so none can be made after test data is observed.
+
+# ─── Graph configuration sensitivity grid (§6b, Rule 22) ────────────────────
+# One dimension varied at a time, the other two held at the Phase 2
+# baseline. 7 configs, not 27. Searched on the DYNAMIC arm's VALIDATION
+# predictions only (§1 of the single-session rework); the winner is frozen
+# before the frozen graph is built in-session, and never revisited after
+# test results are seen.
+graph_grid:
+  baseline: { k_pos: 8, k_neg: 4, corr_window: 60 }
+  k_pos_sweep: [6, 8, 10]
+  k_neg_sweep: [3, 4, 5]
+  corr_window_sweep: [45, 60, 90]
+  selection_metric: "sharpe"     # decided now, before any run
+
+# ─── Significance testing (§6 of the single-session rework) ─────────────────
+significance:
+  wilcoxon_alpha: 0.05
+  bootstrap_iterations: 5000
+  bootstrap_block_length: 10
 
 # ─── Walk-forward folds ───────────────────────────────────────────────────
-# Defined explicitly per §5.1. Train window expands chronologically. The
-# most recent ~15% of each training window is reserved as validation for
-# early stopping (also chronological). The hard constraint asserted in
-# code is max(train_dates) < min(test_dates) on every fold.
+# Identical to Phase 1/2. Train window expands chronologically; the
+# latest ~15% of each training window is validation for early stopping.
+# Hard constraint asserted in code: max(train) < min(test) on every fold.
 folds:
   - name: "fold_1_2019_calm"
     train_start: "2015-01-01"

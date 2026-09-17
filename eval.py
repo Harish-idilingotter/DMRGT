@@ -1,98 +1,49 @@
-"""DMRGT Phase 1 — evaluation harness (§5.3).
+"""DMRGT Phase 3 — evaluation harness (§5.2).
 
-Every model (random, persistence, Transformer) flows through the same
-functions here. Rank IC, directional accuracy, Huber loss, MSE, and
-cost-aware backtest via vectorbt.
+Rank IC (Spearman, per day, averaged), directional accuracy, Huber/MSE,
+and the cost-aware long/short decile backtest. Every model — random,
+persistence, dmrgt_all3, dmrgt_frozen — flows through the exact same
+functions here; no model is special-cased.
+
+Metric formulas are identical to Phase 1/2 with ONE deliberate, decided
+correction, recorded here so nobody re-litigates it silently:
+
+  LEG DIRECTION. The Phase 1/2 specs define the strategy as "long the
+  top decile, short the bottom decile" — the top-predicted stocks are
+  bought. Phase 2's implementation accidentally inverted this
+  (`ranks <= k` on an ASCENDING rank selects the LOWEST predictions),
+  which is visible in the Phase 2 results as a Sharpe ordering exactly
+  inverted relative to the rank IC ordering (LSTM: IC −0.0016, best
+  Sharpe; DMRGT all3: best IC, worst Sharpe). Phase 3 fixes the legs to
+  match the written definition. Consequences: rank IC, directional
+  accuracy, turnover and the cost model are UNCHANGED and remain
+  comparable across phases; Sharpe and cumulative return are NOT
+  numerically comparable to the Phase 2 table (they were leg-inverted
+  there). Phase 3's numbers are internally consistent and economically
+  meaningful, which matters because the §6b graph grid selects on Sharpe.
+
+Two Phase 3 additions (per §5.2):
+  * evaluate_predictions(..., split=...) — filters to "val" or "test"
+    rows before scoring, so selection can be locked to validation.
+  * backtest(..., postprocessing=...) — applies an optional
+    post-processing dict (no_trade_band / decile_fraction /
+    smoothing_days) to predictions before ranking; None is a no-op.
 """
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, asdict
+from pathlib import Path
 from typing import Callable, Iterable
 
 import numpy as np
 import pandas as pd
-import vectorbt as vbt
 from scipy.stats import spearmanr
 
-
-_MLFLOW_DISABLED = os.environ.get("DMRGT_DISABLE_MLFLOW", "0") == "1"
-_MLFLOW: object | None = None
+import paths
 
 
-def _maybe_init_mlflow(experiment: str = "dmrgt-phase1",
-                       tracking_uri: str | None = None) -> bool:
-    """Init MLflow once. Returns True if logging is active."""
-    global _MLFLOW
-    if _MLFLOW_DISABLED:
-        return False
-    if _MLFLOW is not None:
-        return True
-    try:
-        import mlflow  # noqa: F401
-    except Exception:
-        return False
-    if tracking_uri is None:
-        # Default: a local SQLite-backed MLflow tracking store. MLflow
-        # 3.x deprecated the filesystem backend in favour of a DB, so
-        # we use SQLite by default. The spec is satisfied either way
-        # (§2.5: "log to local MLflow from eval.py. Same audit trail,
-        # no server"). The DB lives at artifacts/mlflow.db and is
-        # browsable with `mlflow ui --backend-store-uri sqlite:///...`.
-        import paths
-        db_path = paths.OUTPUT_DIR / "mlflow.db"
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        tracking_uri = f"sqlite:///{db_path}"
-    try:
-        import mlflow as mlf
-        mlf.set_tracking_uri(tracking_uri)
-        mlf.set_experiment(experiment)
-        _MLFLOW = mlf
-        return True
-    except Exception:
-        return False
-
-
-def log_fold_to_mlflow(fold_metrics, cfg: dict | None = None,
-                       run_name: str | None = None) -> bool:
-    """Log one fold's metrics to MLflow. No-op if MLflow is unavailable.
-
-    Called by ``compare.py`` after each model has been evaluated across
-    all folds. The audit trail lives in ``artifacts/mlruns/``."""
-    if not _maybe_init_mlflow():
-        return False
-    import mlflow as mlf
-    fm = fold_metrics
-    tags = {"model": fm.model, "fold": fm.fold,
-            "seed": str(fm.seed if fm.seed is not None else "none")}
-    params = {
-        "lookback": cfg["features"]["lookback_days"] if cfg else 0,
-        "decile_fraction": cfg["backtest"]["decile_fraction"] if cfg else 0,
-        "commission_bps": cfg["backtest"]["commission_bps"] if cfg else 0,
-        "slippage_bps": cfg["backtest"]["slippage_bps"] if cfg else 0,
-    }
-    metrics = {
-        "mean_rank_ic": float(fm.mean_rank_ic),
-        "std_rank_ic": float(fm.std_rank_ic),
-        "directional_acc": float(fm.directional_acc),
-        "huber_loss": float(fm.huber_loss),
-        "mse": float(fm.mse),
-        "sharpe_after_costs": float(fm.sharpe_after_costs),
-        "max_drawdown": float(fm.max_drawdown),
-        "turnover": float(fm.turnover),
-        "cum_return": float(fm.cum_return),
-        "n_test_days": int(fm.n_test_days),
-    }
-    try:
-        with mlf.start_run(run_name=run_name, nested=False):
-            mlf.set_tags(tags)
-            mlf.log_params(params)
-            mlf.log_metrics(metrics)
-        return True
-    except Exception:
-        return False
-
+# ─── per-day metrics (formulas unchanged from Phase 1/2) ─────────────────
 
 def _huber_loss(residuals: np.ndarray, delta: float) -> np.ndarray:
     """Per-element Huber loss: quadratic for |r|<=delta, linear otherwise."""
@@ -103,20 +54,50 @@ def _huber_loss(residuals: np.ndarray, delta: float) -> np.ndarray:
     return np.where(abs_r <= delta, quadratic, linear)
 
 
+def per_day_rank_ic(pred: np.ndarray, true: np.ndarray) -> float:
+    """Spearman rank IC for a single cross-section. NaN if either side
+    has zero variance; the aggregator drops NaN days."""
+    if pred.size < 2:
+        return float("nan")
+    if np.std(pred) == 0 or np.std(true) == 0:
+        return float("nan")
+    rho, _ = spearmanr(pred, true)
+    return float(rho) if np.isfinite(rho) else float("nan")
+
+
+def per_day_directional_acc(pred: np.ndarray, true: np.ndarray) -> float:
+    """Fraction of stocks with sign(pred) == sign(true), over valid pairs."""
+    mask = np.isfinite(pred) & np.isfinite(true)
+    if not mask.any():
+        return float("nan")
+    return float(np.mean(np.sign(pred[mask]) == np.sign(true[mask])))
+
+
+def per_day_huber(pred: np.ndarray, true: np.ndarray, delta: float) -> float:
+    mask = np.isfinite(pred) & np.isfinite(true)
+    if not mask.any():
+        return float("nan")
+    return float(np.mean(_huber_loss(pred[mask] - true[mask], delta)))
+
+
+def per_day_mse(pred: np.ndarray, true: np.ndarray) -> float:
+    mask = np.isfinite(pred) & np.isfinite(true)
+    if not mask.any():
+        return float("nan")
+    return float(np.mean((pred[mask] - true[mask]) ** 2))
+
+
+# ─── dataclasses ──────────────────────────────────────────────────────────
 
 @dataclass
 class FoldMetrics:
-    """All metrics for a single fold × single seed × single model.
-
-    The Transformer emits per-seed rows; the baselines emit a single
-    row per fold (they have no seeds). Aggregation happens in
-    ``summarise``.
-    """
+    """All metrics for one model × fold × seed × split."""
     model: str
     fold: str
     seed: int | None
-    n_test_days: int
-    # Prediction metrics — aggregated across the fold's test days
+    split: str
+    n_days: int
+    # Prediction metrics — aggregated across the split's days
     mean_rank_ic: float
     std_rank_ic: float
     directional_acc: float
@@ -131,182 +112,158 @@ class FoldMetrics:
 
 @dataclass
 class FoldResult:
-    """The full output of evaluating one model on one fold.
+    """Full output of evaluating one model on one fold.
 
-    ``per_day`` is the un-aggregated per-day metric table — useful for
-    debugging and for plotting the IC time series.
+    ``per_day`` is the un-aggregated per-day metric table;
+    ``backtest_returns`` is the daily portfolio return series after
+    costs (used by stats.py's bootstrap).
     """
     model: str
     fold: str
     seed: int | None
+    split: str
     per_day: pd.DataFrame
     fold_metrics: FoldMetrics
-    backtest_returns: pd.Series  # daily returns from the backtest
+    backtest_returns: pd.Series
 
 
+def summarise(results: Iterable[FoldResult]) -> pd.DataFrame:
+    """Flatten FoldResults into a tidy DataFrame."""
+    return pd.DataFrame([asdict(r.fold_metrics) for r in results])
 
-def per_day_rank_ic(pred: np.ndarray, true: np.ndarray) -> float:
-    """Spearman rank IC for a single cross-section.
 
-    Returns NaN if either side has zero variance. The aggregator drops
-    NaN days before computing the mean.
+# ─── realised raw returns ─────────────────────────────────────────────────
+
+def raw_returns_from_targets(targets: pd.DataFrame,
+                             universe: list[str]) -> pd.DataFrame:
+    """Recover realised RAW daily returns from the excess-return target.
+
+    The backtest earns the raw return, not the demeaned target; raw[t] =
+    excess[t] + cross-sectional mean[t]. Wide frame, date × universe.
     """
-    if pred.size < 2:
-        return float("nan")
-    if np.std(pred) == 0 or np.std(true) == 0:
-        return float("nan")
-    rho, _ = spearmanr(pred, true)
-    return float(rho) if np.isfinite(rho) else float("nan")
+    tgt_wide = (targets.pivot(index="date", columns="ticker",
+                              values="excess_return")
+                .sort_index()
+                .reindex(columns=universe))
+    return tgt_wide.add(tgt_wide.mean(axis=1), axis=0)
 
 
-def per_day_directional_acc(pred: np.ndarray, true: np.ndarray) -> float:
-    """Fraction of stocks with sign(pred) == sign(true).
+# ─── post-processing (§9, applied identically to both arms — Rule 19) ─────
 
-    NaN-safe: NaN inputs are treated as wrong and excluded from both
-    numerator and denominator. The aggregated number is over the
-    valid pairs only.
+DEFAULT_POSTPROCESSING: dict = {
+    "no_trade_band": 0.0,
+    "decile_fraction": None,   # None → fall back to cfg backtest.decile_fraction
+    "smoothing_days": 1,
+}
+
+
+def apply_postprocessing(preds: pd.DataFrame,
+                         postprocessing: dict | None) -> pd.DataFrame:
+    """Apply the Tier-1 post-processing rules to a long predictions frame.
+
+    Rules, in order:
+      1. smoothing_days — causal (trailing) rolling mean of y_pred over
+         `smoothing_days` dates, per ticker, within each (model, fold,
+         seed) group. Never looks ahead. 1 → no-op.
+      2. no_trade_band — stocks whose |smoothed prediction| < band are
+         flagged untradable on that date (``tradable`` column, False).
+         The backtest excludes them from leg selection; rank IC keeps
+         scoring them (the band is a trading rule, not a model change).
+
+    decile_fraction travels in the same dict but is a backtest parameter
+    (leg size), not a per-row transformation — backtest() reads it.
+
+    Returns a new DataFrame; the input is not mutated.
     """
-    mask = np.isfinite(pred) & np.isfinite(true)
-    if not mask.any():
-        return float("nan")
-    p = pred[mask]
-    t = true[mask]
-    return float(np.mean(np.sign(p) == np.sign(t)))
+    if postprocessing is None:
+        pp = dict(DEFAULT_POSTPROCESSING)
+    else:
+        pp = {**DEFAULT_POSTPROCESSING, **{
+            k: v for k, v in postprocessing.items()
+            if k in DEFAULT_POSTPROCESSING and v is not None
+        }}
+
+    df = preds.copy()
+    if "tradable" not in df.columns:
+        df["tradable"] = True
+
+    # ── 1. causal smoothing ──────────────────────────────────────────
+    smooth = int(pp.get("smoothing_days", 1) or 1)
+    if smooth > 1:
+        # Rolling per ticker within each (model, fold, seed) run — rows
+        # of different tickers must never be mixed into one window.
+        keys = [c for c in ("model", "fold", "seed", "ticker")
+                if c in df.columns]
+        df = df.sort_values(keys + ["date"])
+        df["y_pred"] = (df.groupby(keys, sort=False)["y_pred"]
+                        .transform(lambda s: s.rolling(smooth,
+                                                       min_periods=1).mean()))
+        df = df.reset_index(drop=True)
+
+    # ── 2. no-trade band ─────────────────────────────────────────────
+    band = float(pp.get("no_trade_band", 0.0) or 0.0)
+    df["tradable"] = df["y_pred"].abs() >= band
+
+    return df
 
 
-def per_day_huber(pred: np.ndarray, true: np.ndarray, delta: float) -> float:
-    """Mean Huber loss across the cross-section for one day.
-
-    Uses the piecewise Huber loss with the configured delta. NaN pairs
-    are excluded.
-    """
-    mask = np.isfinite(pred) & np.isfinite(true)
-    if not mask.any():
-        return float("nan")
-    p = pred[mask]
-    t = true[mask]
-    return float(np.mean(_huber_loss(p - t, delta)))
-
-
-def per_day_mse(pred: np.ndarray, true: np.ndarray) -> float:
-    """Mean squared error across the cross-section for one day."""
-    mask = np.isfinite(pred) & np.isfinite(true)
-    if not mask.any():
-        return float("nan")
-    p = pred[mask]
-    t = true[mask]
-    return float(np.mean((p - t) ** 2))
-
-
+# ─── the cost-aware backtest (§5.2) ───────────────────────────────────────
 
 def backtest_daily_deciles(
-    predictions_by_day: pd.DataFrame,
-    true_returns_by_day: pd.DataFrame,
+    predictions_by_day: pd.DataFrame,   # date × ticker, values = y_pred
+    true_returns_by_day: pd.DataFrame,  # date × ticker, values = realised raw return
     tickers: list[str],
     commission_bps: float,
     slippage_bps: float,
     decile_fraction: float,
+    tradable_by_day: pd.DataFrame | None = None,  # date × ticker bool; None = all tradable
 ) -> tuple[pd.Series, dict]:
-    """Long top decile, short bottom decile, equal-weighted within each leg.
+    """Long the top decile, short the bottom decile, equal-weighted within
+    each leg. Legs are selected among the day's tradable stocks only.
 
-    Parameters
-    ----------
-    predictions_by_day : DataFrame
-        Index=date, columns=ticker, values=predicted excess return. One
-        row per test day.
-    true_returns_by_day : DataFrame
-        Index=date, columns=ticker, values=the realised next-day *raw*
-        return (not excess) for the SAME date. The backtest earns the
-        raw return — the excess-return target is for ranking only.
-    tickers : list of str
-        The stock tickers, in a stable order.
-    commission_bps : float
-        One-way commission in basis points (10 bps = 0.10%).
-    slippage_bps : float
-        One-way slippage in basis points (5 bps = 0.05%).
-    decile_fraction : float
-        Top/bottom fraction to go long/short. 0.2 → 4 longs + 4 shorts
-        out of n stocks.
+    Positions decided from day-t predictions earn day-t+1 returns
+    (weights are shifted one day before multiplying realised returns —
+    no same-day lookahead). Commission + slippage are charged on
+    weight changes: fee = (commission_bps + slippage_bps) / 1e4, applied
+    to half the absolute daily weight change (one-way turnover).
 
-    Returns
-    -------
-    (returns, stats)
-        ``returns`` is a pd.Series of daily portfolio returns, indexed by
-        the test dates in input order. ``stats`` is a dict with keys
-        ``sharpe``, ``max_drawdown``, ``turnover``, ``cum_return``.
+    Returns (daily portfolio return series after costs, stats dict).
     """
     pred = predictions_by_day[tickers]
     rets = true_returns_by_day[tickers]
+    trad = tradable_by_day[tickers] if tradable_by_day is not None else None
 
     n = len(tickers)
-    k = max(1, int(round(n * decile_fraction)))  # e.g. 8 for n=40, f=0.2
-
-    # ── build the long/short signals ─────────────────────────────────
-    # rank along the cross-section (axis=1) — rank 0..n-1.
-    ranks = pred.rank(axis=1, ascending=True, method="first")
-    is_long = ranks <= k
-    is_short = ranks > (n - k)
-    is_invested = is_long | is_short
-
-    # equal weight within each leg. With k=4 longs and k=4 shorts the
-    # gross exposure is 1 (long +0.25 per leg, short -0.25 per leg = 0
-    # net), the standard 1× dollar-neutral construction.
-    long_n = is_long.sum(axis=1).replace(0, 1)
-    short_n = is_short.sum(axis=1).replace(0, 1)
-    long_w = is_long.astype(float).div(long_n, axis=0)
-    short_w = is_short.astype(float).div(short_n, axis=0)
-    weights = (long_w.fillna(0) - short_w.fillna(0))
-
-    # days with no positions → zero weight
-    weights = weights.where(is_invested, 0.0)
-
-    # ── build the entries/exits for vbt ─────────────────────────────
-    # A position change is an entry when weight goes 0→nonzero and an
-    # exit when nonzero→0. We approximate "position change" by counting
-    # any change in the discretised leg membership.
-    long_change = (is_long != is_long.shift(1)).fillna(is_long).any(axis=1)
-    short_change = (is_short != is_short.shift(1)).fillna(is_short).any(axis=1)
-    entries = (long_change | short_change).astype(bool)
-    # vbt's from_signals treats entries/exits as 0/1 booleans. We use
-    # `entries` for both since the portfolio rebalances every day that
-    # the membership changes.
-    exits = entries.shift(1, fill_value=False).astype(bool) & ~entries
-
-    # ── run the portfolio ───────────────────────────────────────────
-    # vbt's fees are charged on each entry (one-way) by default.
-    # commission + slippage is applied as a single combined fee in
-    # decimal (10 bps + 5 bps = 15 bps = 0.0015 per leg change).
     fee = (commission_bps + slippage_bps) / 10_000.0
-    init_cash = 1.0
-    pf = vbt.Portfolio.from_signals(
-        close=rets,
-        entries=entries,
-        exits=exits,
-        size=np.nan,           # sizes inferred from weights
-        size_type="percent",
-        fees=fee,
-        freq="1D",
-        init_cash=init_cash,
-    )
 
-    # vbt's per-asset stats (max_drawdown, sharpe_ratio, total_return)
-    # are Series when given a wide close frame. We aggregate to a
-    # single portfolio by hand from the weights and the realised
-    # returns, which is the cleanest way to get a single scalar
-    # Sharpe / max DD / cum return for a dollar-neutral basket.
-    # We then use pf.returns() (which already accounts for the
-    # per-leg fees vbt charged) as a sanity check.
+    weights = pd.DataFrame(0.0, index=pred.index, columns=tickers)
+    for i, d in enumerate(pred.index):
+        row = pred.loc[d].to_numpy(dtype=float)
+        ok = (trad.loc[d].to_numpy(dtype=bool)
+              if trad is not None else np.ones(n, dtype=bool))
+        idx = np.flatnonzero(ok & np.isfinite(row))
+        if idx.size == 0:
+            continue  # nothing tradable → flat that day
+        scores = row[idx]
+        k = max(1, int(round(idx.size * decile_fraction)))
+        k = min(k, idx.size)  # degenerate wide legs cancel to ~0 net
+        order = np.argsort(-scores, kind="stable")  # descending: best first
+        longs = idx[order[:k]]
+        shorts = idx[order[-k:]]
+        w = np.zeros(n)
+        w[longs] += 1.0 / len(longs)
+        w[shorts] -= 1.0 / len(shorts)
+        weights.iloc[i] = w
+
+    # Positions taken at close t earn returns realised at t+1.
     raw_port = (weights.shift(1).fillna(0) * rets).sum(axis=1)
-    # Cost: each entry (long_change | short_change) incurs fee * 1.0
-    # worth of notional (the leg size we just bought/sold). Approximate
-    # the cost as fee * |weight change summed| / 2 since each entry
-    # represents an open and a close.
+    # Cost: one-way fee on each unit of weight change.
     w_change = weights.diff().abs().sum(axis=1).fillna(0)
     cost = fee * w_change / 2
     daily_ret = (raw_port - cost).astype(float)
     daily_ret.index = pd.DatetimeIndex(daily_ret.index)
 
-    # Sharpe — annualised, with risk-free = 0, daily returns.
+    # Sharpe — annualised, risk-free 0, sample std.
     sd = float(daily_ret.std(ddof=1))
     sharpe = float(daily_ret.mean() / sd * np.sqrt(252)) if sd > 0 else 0.0
     # Max drawdown from the equity curve.
@@ -314,9 +271,8 @@ def backtest_daily_deciles(
     peak = eq.cummax()
     dd = (eq - peak) / peak
     max_dd = float(-dd.min()) if dd.notna().any() else float("nan")
-    # Turnover — one-way, fraction of NAV that changes per day.
+    # Turnover — one-way, fraction of NAV changing per day.
     turnover = float(w_change.mean() / 2)
-    # Cumulative return
     cum = float(eq.iloc[-1] - 1) if len(eq) > 0 else float("nan")
 
     return daily_ret, {
@@ -327,6 +283,52 @@ def backtest_daily_deciles(
     }
 
 
+def _effective_decile_fraction(cfg: dict, postprocessing: dict | None) -> float:
+    """Post-processing decile_fraction overrides the config default."""
+    if postprocessing and postprocessing.get("decile_fraction") is not None:
+        return float(postprocessing["decile_fraction"])
+    return float(cfg["backtest"]["decile_fraction"])
+
+
+def _score_wide_group(
+    wide_pred: pd.DataFrame,
+    wide_true: pd.DataFrame,
+    raw_wide: pd.DataFrame,
+    tradable_wide: pd.DataFrame | None,
+    cfg: dict,
+    decile_fraction: float,
+    universe: list[str],
+) -> tuple[pd.DataFrame, pd.Series, dict]:
+    """Per-day metrics + backtest for one (model, fold, seed) wide group."""
+    dates = wide_pred.index
+    per_day_rows = []
+    for d in dates:
+        y_pred = wide_pred.loc[d, universe].to_numpy()
+        y_true = wide_true.loc[d, universe].to_numpy()
+        per_day_rows.append({
+            "date": d,
+            "rank_ic": per_day_rank_ic(y_pred, y_true),
+            "dir_acc": per_day_directional_acc(y_pred, y_true),
+            "huber": per_day_huber(y_pred, y_true,
+                                   delta=cfg["training"]["huber_delta"]),
+            "mse": per_day_mse(y_pred, y_true),
+        })
+    per_day = pd.DataFrame(per_day_rows).set_index("date")
+
+    bt_raw = raw_wide.reindex(dates).reindex(columns=universe)
+    daily_ret, bt_stats = backtest_daily_deciles(
+        predictions_by_day=wide_pred,
+        true_returns_by_day=bt_raw,
+        tickers=universe,
+        commission_bps=cfg["backtest"]["commission_bps"],
+        slippage_bps=cfg["backtest"]["slippage_bps"],
+        decile_fraction=decile_fraction,
+        tradable_by_day=tradable_wide,
+    )
+    return per_day, daily_ret, bt_stats
+
+
+# ─── baseline path: model_fn over a fold's split (§5.3 gate) ──────────────
 
 def evaluate_fold(
     model_name: str,
@@ -336,73 +338,57 @@ def evaluate_fold(
     targets: pd.DataFrame,
     cfg: dict,
     seed: int | None = None,
-    lookback: int = 30,
+    lookback: int | None = None,
 ) -> FoldResult:
-    """Run one model through the per-day harness on one fold.
-    model_fn(X) -> y_pred where X is [n_stocks, lookback, n_features]."""
+    """Run one closed-form model through the per-day harness on one fold.
+
+    Assembles the same windows the trained model sees: for prediction
+    date d, features from [d-lookback+1 .. d] INCLUSIVE of d (Rule 3 —
+    features come from day t and earlier). Note: Phase 2's baseline
+    harness used a window ending at d-1; the trained models' assembly
+    always ended at d. Phase 3 unifies on the spec-correct inclusive
+    window, so persistence numbers shift slightly vs Phase 2's recorded
+    floor; the random gate is unaffected (noise ignores input).
+    """
     universe = list(cfg["universe"]["tickers"])
     n_stocks = len(universe)
-    feature_cols = [c for c in features.columns if c.startswith("f") and "_" in c]
-    n_features = len(feature_cols)
-    assert n_stocks == len(universe), (
-        f"Expected {len(universe)} stocks from config, got {n_stocks}"
-    )
-    assert n_features == 8, f"Expected 8 features; got {n_features}"
+    if lookback is None:
+        lookback = int(cfg["features"]["lookback_days"])
+    feature_cols = list(cfg["features"]["columns"])
 
-    # Index features/targets for fast lookup
+    # Reindex to guarantee the feature level follows configs.yaml order —
+    # pivot's MultiIndex columns are sorted lexicographically, which would
+    # silently reorder X's feature axis if configs ever listed features
+    # out of alphabetical order.
     feat_wide = (features.pivot(index="date", columns="ticker",
                                 values=feature_cols)
                  .sort_index())
-    # MultiIndex columns: (feature, ticker)
-    tgt_wide = targets.pivot(index="date", columns="ticker",
-                             values="excess_return").sort_index()
+    feat_wide = feat_wide.reindex(columns=pd.MultiIndex.from_product(
+        [feature_cols, list(feat_wide.columns.get_level_values("ticker")
+                            .unique())],
+        names=["feature", "ticker"]))
+    tgt_wide = (targets.pivot(index="date", columns="ticker",
+                              values="excess_return")
+                .sort_index())
+    raw_wide = raw_returns_from_targets(targets, universe)
 
-    # The realised *raw* return on day t (= close[t]/close[t-1]-1) is
-    # what the backtest earns. The target table holds excess returns
-    # (demeaned) — for the backtest we need the raw. We can recover it
-    # from the per-day cross-sectional mean of the excess returns plus
-    # the excess itself: raw[t] = excess[t] + mean[t] where mean[t] is
-    # the universe mean. But the targets table is missing the final
-    # date (it was dropped — §4 step 4). For the backtest we need a
-    # return series that covers every test date; we therefore rebuild
-    # the per-day universe mean from the targets that exist, accepting
-    # the last-day drop.
-    raw_wide = tgt_wide.add(tgt_wide.mean(axis=1), axis=0)
-    # raw_wide now holds daily_return[t] for every (date, ticker). This
-    # is the return realised on day t — i.e. the return earned by a
-    # portfolio that takes positions at the close of day t-1 and holds
-    # to the close of day t. The label for day t (excess at t+1) is
-    # about the return ON day t+1, but for the backtest we use the
-    # realised return of the SAME date the prediction was made for.
-
-    # Walk every test date. For each, assemble the lookback window of
-    # features and run the model.
     test_dates = list(fold.test_dates)
-    pred_rows = []
-    true_rows = []
-    daily_metrics = []
+    pred_rows, true_rows, daily_metrics = [], [], []
     for d in test_dates:
         if d not in feat_wide.index or d not in tgt_wide.index:
-            # The features/targets tables may be missing some test
-            # dates (e.g. last date dropped from targets). Skip.
-            continue
+            continue  # e.g. last date dropped from targets
         d_loc = feat_wide.index.get_loc(d)
-        if d_loc < lookback:
-            # Not enough history to assemble a full lookback window.
-            continue
-
-        window_dates = feat_wide.index[d_loc - lookback: d_loc]
-        # Shape [lookback, n_stocks, n_features]
-        X = np.empty((lookback, n_stocks, n_features), dtype=np.float64)
+        if d_loc < lookback - 1:
+            continue  # not enough history for an inclusive window
+        window_dates = feat_wide.index[d_loc - lookback + 1: d_loc + 1]
+        assert len(window_dates) == lookback
+        assert window_dates[-1] == d
+        X = np.empty((n_stocks, lookback, len(feature_cols)), dtype=np.float64)
         for j, t in enumerate(universe):
-            X[:, j, :] = feat_wide.loc[window_dates, (slice(None), t)].values
-        # Reorder to [n_stocks, lookback, n_features] for the model
-        X_t = np.transpose(X, (1, 0, 2))
-        # If any NaN sneaks in (shouldn't, after the warm-up drop),
-        # skip this day.
-        if not np.isfinite(X_t).all():
+            X[j] = feat_wide.loc[window_dates, (slice(None), t)].values
+        if not np.isfinite(X).all():
             continue
-        y_pred = model_fn(X_t)
+        y_pred = model_fn(X)
         y_true = tgt_wide.loc[d, universe].values
         pred_rows.append(pd.Series(y_pred, index=universe, name=d))
         true_rows.append(pd.Series(y_true, index=universe, name=d))
@@ -424,36 +410,23 @@ def evaluate_fold(
     pred_df = pd.DataFrame(pred_rows)
     true_df = pd.DataFrame(true_rows)
 
-    # ── backtest on the test window ─────────────────────────────────
-    bt_dates = pred_df.index
-    bt_pred = pred_df.copy()
-    bt_raw = raw_wide.loc[bt_dates, universe]
-    daily_ret, bt_stats = backtest_daily_deciles(
-        predictions_by_day=bt_pred,
-        true_returns_by_day=bt_raw,
-        tickers=universe,
-        commission_bps=cfg["backtest"]["commission_bps"],
-        slippage_bps=cfg["backtest"]["slippage_bps"],
-        decile_fraction=cfg["backtest"]["decile_fraction"],
+    _, daily_ret, bt_stats = _score_wide_group(
+        pred_df, true_df, raw_wide, None, cfg,
+        decile_fraction=float(cfg["backtest"]["decile_fraction"]),
+        universe=universe,
     )
-
-    # ── aggregate per-day metrics across the fold ───────────────────
-    mean_ic = float(np.nanmean(daily_df["rank_ic"]))
-    std_ic = float(np.nanstd(daily_df["rank_ic"], ddof=1))
-    mean_dir = float(np.nanmean(daily_df["dir_acc"]))
-    mean_huber = float(np.nanmean(daily_df["huber"]))
-    mean_mse = float(np.nanmean(daily_df["mse"]))
 
     metrics = FoldMetrics(
         model=model_name,
         fold=fold.name,
         seed=seed,
-        n_test_days=len(daily_df),
-        mean_rank_ic=mean_ic,
-        std_rank_ic=std_ic,
-        directional_acc=mean_dir,
-        huber_loss=mean_huber,
-        mse=mean_mse,
+        split="test",
+        n_days=len(daily_df),
+        mean_rank_ic=float(np.nanmean(daily_df["rank_ic"])),
+        std_rank_ic=float(np.nanstd(daily_df["rank_ic"], ddof=1)),
+        directional_acc=float(np.nanmean(daily_df["dir_acc"])),
+        huber_loss=float(np.nanmean(daily_df["huber"])),
+        mse=float(np.nanmean(daily_df["mse"])),
         sharpe_after_costs=bt_stats["sharpe"],
         max_drawdown=bt_stats["max_drawdown"],
         turnover=bt_stats["turnover"],
@@ -463,96 +436,133 @@ def evaluate_fold(
         model=model_name,
         fold=fold.name,
         seed=seed,
+        split="test",
         per_day=daily_df,
         fold_metrics=metrics,
         backtest_returns=daily_ret,
     )
 
 
+# ─── predictions-parquet path (trained models) ────────────────────────────
 
-def summarise(results: Iterable[FoldResult]) -> pd.DataFrame:
-    """Flatten a list of FoldResults into a tidy DataFrame."""
-    rows = [asdict(r.fold_metrics) for r in results]
-    return pd.DataFrame(rows)
+def load_predictions(model_id: str | None = None,
+                     split: str | None = None,
+                     source: str | Path | None = None) -> pd.DataFrame:
+    """Load a Phase 3 predictions parquet.
 
+    Resolution order: explicit `source` (file or directory) →
+    artifacts/predictions_{model_id}.parquet. Optionally filters to one
+    `split` ("val" / "test").
+    """
+    src = Path(source) if source is not None else paths.OUTPUT_DIR
+    if src.is_dir():
+        if model_id is None:
+            matches = sorted(src.glob("predictions_*.parquet"))
+            if not matches:
+                raise FileNotFoundError(f"No predictions_*.parquet in {src}")
+            if len(matches) > 1 and model_id is None:
+                raise ValueError(
+                    f"Multiple prediction files in {src}; pass model_id "
+                    f"to disambiguate: {[m.name for m in matches]}"
+                )
+            src = matches[0]
+        else:
+            src = src / f"predictions_{model_id}.parquet"
+    if not src.exists():
+        raise FileNotFoundError(
+            f"Predictions not found: {src}. Download the Kaggle output "
+            f"into artifacts/ first."
+        )
+    df = pd.read_parquet(src)
+    required = {"model", "fold", "seed", "split", "date", "ticker",
+                "y_pred", "y_true"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(
+            f"predictions parquet {src.name} missing columns: {missing}. "
+            f"Have: {list(df.columns)}"
+        )
+    if split is not None:
+        df = df[df["split"] == split]
+        if df.empty:
+            raise ValueError(
+                f"{src.name} has no rows with split == {split!r}. "
+                f"Splits present: {sorted(pd.read_parquet(src)['split'].unique())}"
+            )
+    return df
 
 
 def evaluate_predictions(
-    predictions_path,
+    source: str | Path | pd.DataFrame,
     targets: pd.DataFrame,
     cfg: dict,
+    split: str | None = None,
+    postprocessing: dict | None = None,
     universe: list[str] | None = None,
 ) -> list[FoldResult]:
-    """Re-evaluate a downloaded predictions.parquet through the same
-    code path as evaluate_fold. One FoldResult per (fold, seed)."""
+    """Re-evaluate a predictions parquet (Phase 3 schema with a `split`
+    column) through the same code path as evaluate_fold. One FoldResult
+    per (model, fold, seed) — the pairing stats.py's Wilcoxon test uses.
+    """
     if universe is None:
         universe = list(cfg["universe"]["tickers"])
-    pred_df = pd.read_parquet(predictions_path)
-    required = {"model", "fold", "seed", "date", "ticker", "y_pred", "y_true"}
-    missing = required - set(pred_df.columns)
-    if missing:
+    pred_df = (source if isinstance(source, pd.DataFrame)
+               else load_predictions(source, split=split))
+    pred_df = apply_postprocessing(pred_df, postprocessing)
+
+    if split is not None:
+        pred_df = pred_df[pred_df["split"] == split]
+    if pred_df.empty:
+        raise ValueError(f"No prediction rows to evaluate (split={split!r})")
+    if pred_df["model"].nunique() > 1:
         raise ValueError(
-            f"predictions.parquet missing columns: {missing}. "
-            f"Have: {list(pred_df.columns)}"
+            "evaluate_predictions refuses to pool multiple models into one "
+            "result set — evaluate one arm at a time so the two arms of "
+            "the comparison can never be silently mixed."
         )
 
-    # Realised raw return per (date, ticker) — same construction as
-    # in evaluate_fold: raw[t] = excess[t] + mean[t] over the universe.
-    tgt_wide = (targets.pivot(index="date", columns="ticker",
-                              values="excess_return")
-                .sort_index())
-    raw_wide = tgt_wide.add(tgt_wide.mean(axis=1), axis=0)
+    raw_wide = raw_returns_from_targets(targets, universe)
+    frac = _effective_decile_fraction(cfg, postprocessing)
 
     results: list[FoldResult] = []
     for (model_name, fold_name, seed), grp in pred_df.groupby(
             ["model", "fold", "seed"]):
-        seed_val = int(seed) if pd.notna(seed) else None
-        # Pivot to wide [date × ticker] for this (model, fold, seed)
-        wide_pred = grp.pivot(index="date", columns="ticker",
-                              values="y_pred").sort_index()
-        wide_true = grp.pivot(index="date", columns="ticker",
-                              values="y_true").sort_index()
-        # Reindex to the configured universe so column order matches
-        wide_pred = wide_pred.reindex(columns=universe)
-        wide_true = wide_true.reindex(columns=universe)
-        # Backtest
-        bt_dates = wide_pred.index
-        bt_raw = raw_wide.reindex(bt_dates).reindex(columns=universe)
-        daily_ret, bt_stats = backtest_daily_deciles(
-            predictions_by_day=wide_pred,
-            true_returns_by_day=bt_raw,
-            tickers=universe,
-            commission_bps=cfg["backtest"]["commission_bps"],
-            slippage_bps=cfg["backtest"]["slippage_bps"],
-            decile_fraction=cfg["backtest"]["decile_fraction"],
+        # A group that mixed splits would silently blend the val and test
+        # windows into one return series — refuse loudly instead.
+        assert grp["split"].nunique() == 1, (
+            f"group model={model_name} fold={fold_name} seed={seed} spans "
+            f"splits {sorted(grp['split'].unique())} — filter with "
+            f"split= before evaluating; never pool the tuning and scoring "
+            f"windows."
         )
+        wide_pred = (grp.pivot(index="date", columns="ticker",
+                               values="y_pred").sort_index()
+                     .reindex(columns=universe))
+        wide_true = (grp.pivot(index="date", columns="ticker",
+                               values="y_true").sort_index()
+                     .reindex(columns=universe))
+        tradable_wide = None
+        if "tradable" in grp.columns:
+            tradable_wide = (grp.pivot(index="date", columns="ticker",
+                                       values="tradable").sort_index()
+                             .reindex(columns=universe))
 
-        # Per-day metrics
-        per_day_rows = []
-        for d in bt_dates:
-            y_pred = wide_pred.loc[d, universe].to_numpy()
-            y_true = wide_true.loc[d, universe].to_numpy()
-            per_day_rows.append({
-                "date": d,
-                "rank_ic": per_day_rank_ic(y_pred, y_true),
-                "dir_acc": per_day_directional_acc(y_pred, y_true),
-                "huber": per_day_huber(y_pred, y_true,
-                                       delta=cfg["training"]["huber_delta"]),
-                "mse": per_day_mse(y_pred, y_true),
-            })
-        daily_df = pd.DataFrame(per_day_rows).set_index("date")
-
-        # Aggregate
+        per_day, daily_ret, bt_stats = _score_wide_group(
+            wide_pred, wide_true, raw_wide, tradable_wide, cfg,
+            decile_fraction=frac, universe=universe,
+        )
+        split_val = str(grp["split"].iloc[0])
         metrics = FoldMetrics(
             model=str(model_name),
             fold=str(fold_name),
-            seed=seed_val,
-            n_test_days=len(daily_df),
-            mean_rank_ic=float(np.nanmean(daily_df["rank_ic"])),
-            std_rank_ic=float(np.nanstd(daily_df["rank_ic"], ddof=1)),
-            directional_acc=float(np.nanmean(daily_df["dir_acc"])),
-            huber_loss=float(np.nanmean(daily_df["huber"])),
-            mse=float(np.nanmean(daily_df["mse"])),
+            seed=int(seed),
+            split=split_val,
+            n_days=len(per_day),
+            mean_rank_ic=float(np.nanmean(per_day["rank_ic"])),
+            std_rank_ic=float(np.nanstd(per_day["rank_ic"], ddof=1)),
+            directional_acc=float(np.nanmean(per_day["dir_acc"])),
+            huber_loss=float(np.nanmean(per_day["huber"])),
+            mse=float(np.nanmean(per_day["mse"])),
             sharpe_after_costs=bt_stats["sharpe"],
             max_drawdown=bt_stats["max_drawdown"],
             turnover=bt_stats["turnover"],
@@ -561,10 +571,56 @@ def evaluate_predictions(
         results.append(FoldResult(
             model=str(model_name),
             fold=str(fold_name),
-            seed=seed_val,
-            per_day=daily_df,
+            seed=int(seed),
+            split=split_val,
+            per_day=per_day,
             fold_metrics=metrics,
             backtest_returns=daily_ret,
         ))
-
     return results
+
+
+# ─── aggregate backtest — the grid's / compare.py interface ───────────────
+
+def backtest(
+    predictions: pd.DataFrame | str | Path,
+    cfg: dict,
+    split: str | None = None,
+    postprocessing: dict | None = None,
+    targets: pd.DataFrame | None = None,
+) -> dict:
+    """Score a predictions frame through the cost-aware backtest and
+    aggregate across every (model, fold, seed) group it contains.
+
+    Aggregation is the MEAN across groups (4 folds × 5 seeds = 20 runs
+    per arm): mean of per-run mean rank ICs, mean of per-run Sharpes,
+    mean of per-run max drawdowns and turnovers. Returns one flat dict;
+    `sharpe` is the key the grid's selection_metric reads.
+
+    Refuses to pool more than one model — a pooled aggregate across the
+    two arms would be meaningless.
+    """
+    df = (predictions if isinstance(predictions, pd.DataFrame)
+          else load_predictions(predictions, split=split))
+    if targets is None:
+        targets = pd.read_parquet(paths.TARGETS)
+    results = evaluate_predictions(df, targets, cfg, split=split,
+                                   postprocessing=postprocessing)
+    if not results:
+        raise ValueError("No (model, fold, seed) groups to backtest")
+
+    per_run = []
+    for r in results:
+        m = asdict(r.fold_metrics)
+        m["sharpe"] = m["sharpe_after_costs"]
+        per_run.append(m)
+    keys = ["mean_rank_ic", "std_rank_ic", "directional_acc", "huber_loss",
+            "mse", "sharpe_after_costs", "max_drawdown", "turnover",
+            "cum_return"]
+    agg = {k: float(np.mean([run[k] for run in per_run])) for k in keys}
+    agg["sharpe"] = agg["sharpe_after_costs"]
+    agg["n_runs"] = len(per_run)
+    agg["n_days"] = int(sum(run["n_days"] for run in per_run))
+    agg["per_run"] = per_run
+    agg["split"] = split
+    return agg

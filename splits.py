@@ -1,8 +1,10 @@
-"""DMRGT Phase 1 — walk-forward fold construction (§5.1).
+"""DMRGT Phase 3 — walk-forward fold construction (§4.3).
 
-Chronological splits with expanding training windows. Validation carved
-from the latest ~15% of training. Single source of truth for train/test
-boundaries.
+Chronological splits with expanding training windows. The latest ~15% of
+each training window is carved as validation for early stopping — also
+chronological, never random. Rewritten fresh for Phase 3 but identical
+in value to Phases 1/2: the cache and the significance test both depend
+on the fold boundaries not moving.
 """
 
 from __future__ import annotations
@@ -36,8 +38,12 @@ def make_folds(
     available_dates: Iterable[pd.Timestamp] | None = None,
     val_fraction: float = 0.15,
 ) -> list[Fold]:
-    """Build walk-forward folds from configs.yaml. val_fraction of train
-    reserved as validation (latest portion, chronological)."""
+    """Build walk-forward folds from configs.yaml.
+
+    `available_dates` restricts each configured window to dates that
+    actually exist in the cache (the features table's calendar). The
+    latest val_fraction of each training window becomes validation.
+    """
     if not 0.0 < val_fraction < 1.0:
         raise ValueError(f"val_fraction must be in (0, 1), got {val_fraction}")
 
@@ -55,7 +61,7 @@ def make_folds(
         test_start = pd.Timestamp(fc["test_start"])
         test_end = pd.Timestamp(fc["test_end"])
 
-        # ── hard chronological invariant (§1.2) ─────────────────────
+        # ── hard chronological invariant (Rule 2) ─────────────────────
         if train_end >= test_start:
             raise AssertionError(
                 f"Fold {name!r}: train_end ({train_end.date()}) must be "
@@ -63,22 +69,19 @@ def make_folds(
                 f"otherwise the model sees the test window during training."
             )
 
-        # ── build the full training and test index ──────────────────
+        # ── build the full training and test index ─────────────────────
         if avail is not None:
-            # Half-open [start, end] inclusive of end-of-day, intersected
-            # with the available dates. The boundary itself is owned by
-            # the config; the data restricts what we can actually use.
+            # Configured window, intersected with dates the cache has.
+            # The boundary itself is owned by the config; the data
+            # restricts what we can actually use.
             train_mask = (avail >= train_start) & (avail <= train_end)
             test_mask = (avail >= test_start) & (avail <= test_end)
             train_full = avail[train_mask]
             test_idx = avail[test_mask]
         else:
-            # Without an availability constraint, we still need a concrete
-            # set of dates for the fold. We synthesise business-day dates
-            # in the configured range — the next consumer that loads the
-            # features table will intersect again and may end up with
-            # fewer dates. This branch exists mainly for tests and for
-            # running splits without the cache.
+            # No availability constraint (tests / running splits without
+            # the cache): synthesise business-day dates. The next consumer
+            # that loads the features table intersects again.
             train_full = pd.bdate_range(train_start, train_end)
             test_idx = pd.bdate_range(test_start, test_end)
 
@@ -87,7 +90,7 @@ def make_folds(
         if len(test_idx) == 0:
             raise ValueError(f"Fold {name!r}: no test dates after intersecting with available dates")
 
-        # ── split off the validation portion (§5.1) ─────────────────
+        # ── split off the validation portion ───────────────────────────
         # The latest val_fraction of the training window becomes the
         # validation set. Chronological, not random.
         n_train_full = len(train_full)
@@ -101,17 +104,15 @@ def make_folds(
         train_idx = train_full[:-n_val]
         val_idx = train_full[-n_val:]
 
-        # ── zero-overlap asserts — fail loudly, never silently ─────
-        # Train and val are adjacent in time but must not overlap.
+        # ── zero-overlap asserts — fail loudly, never silently ─────────
         assert len(set(train_idx).intersection(val_idx)) == 0
-        # Train and test must not overlap.
         assert len(set(train_idx).intersection(test_idx)) == 0
-        # Val and test must not overlap.
         assert len(set(val_idx).intersection(test_idx)) == 0
-        # Chronological: the very last train date precedes the very
-        # first val date, which precedes the very first test date.
+        # Chronological: last train date precedes first val date, which
+        # precedes the first test date.
         assert train_idx.max() < val_idx.min()
         assert val_idx.max() < test_idx.min()
+        assert train_idx.max() < test_idx.min()
 
         out.append(Fold(
             name=name,
@@ -127,12 +128,12 @@ def make_folds(
 if __name__ == "__main__":
     import data
     import paths
-    cfg = data.load_config()
+
+    cfg = data.load_config(str(paths.CONFIG))
     if paths.FEATURES.exists():
         feats = pd.read_parquet(paths.FEATURES, columns=["date"])
         avail = pd.DatetimeIndex(feats["date"].unique())
     else:
         avail = None
-    folds = make_folds(cfg, available_dates=avail)
-    for f in folds:
+    for f in make_folds(cfg, available_dates=avail):
         print(f)

@@ -1,7 +1,12 @@
 # ─── Local-only artefacts — never committed, never uploaded to git. ────
 #
-# cache/    : local Parquet outputs from data.py / features.py.
-#             Uploaded to Kaggle as the versioned `dmrgt-cache` dataset.
+# cache/    : TRACKED — the five parquet inputs, the 7 graphs_<name>
+#             grid variants, hashes.json, and the Kaggle dataset metadata
+#             are committed so a fresh clone can run verify_env.py and the
+#             test suite without rebuilding (see the cache block below).
+#             Also uploaded to Kaggle as the versioned `dmrgt-cache`
+#             dataset — the variants sit in the cache root precisely so
+#             the plain `kaggle datasets version -p cache` includes them.
 # artifacts/: outputs downloaded from Kaggle runs (predictions, metrics,
 #             checkpoints, MLflow runs). Stays local.
 
@@ -12,12 +17,20 @@ env/
 ENV/
 .python-version
 
-# ── Local data cache (Parquet, hashes, Kaggle dataset metadata) ───────
-cache/*.parquet
-cache/*.sha256
-cache/hashes.json
-cache/dataset-metadata.json
+# ── Data cache — TRACKED on purpose ───────────────────────────────────
+# Un-ignored in Phase 3 so the cache travels with the code: prices,
+# features, targets, graphs (dynamic), graphs_frozen (per-fold static),
+# graphs_<name> (the 7 sensitivity-grid graphs), hashes.json, and
+# dataset-metadata.json are all committed. The hash gate in train.py and
+# tests/test_graph_grid.py's content pins verify them on checkout.
+#
+# Everything in cache/ is flat on purpose: `kaggle datasets version -p
+# cache` defaults to --dir-mode skip, which SILENTLY drops subdirectories,
+# so a graph_variants/ directory would upload as nothing at all.
+#
+# Only credentials and stray checksum sidecars stay out of git:
 cache/.kaggle/
+cache/*.sha256
 
 # ── Artifacts downloaded from Kaggle runs (predictions, metrics) ──────
 artifacts/*.parquet
@@ -67,12 +80,15 @@ ipython_config.py
 .DS_Store
 Thumbs.db
 
-# ── Kaggle code dataset (assembled by kaggle/build_code_dataset.sh) ────
+# ── Kaggle code datasets (assembled by build scripts; the copied modules
+#    duplicate the repo roots — only the dataset metadata is tracked)
 kaggle/code/configs.yaml
 kaggle/code/model.py
 kaggle/code/paths.py
 kaggle/code/splits.py
 kaggle/code/train.py
+kaggle/code_phase3/*
+!kaggle/code_phase3/dataset-metadata.json
 
 # ── Logs ──────────────────────────────────────────────────────────────
 *.log
