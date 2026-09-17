@@ -99,9 +99,8 @@ the rework exists to remove (§10 anti-pattern).
 
 ### Runtime — re-measured after every change to the hot path (§5)
 
-The §3.5 fix (assemble_fold drops missing-graph dates instead of
-crashing) touched the measured function, so the projection was
-re-measured; never carry a timing number across a code change.
+Never carry a timing number across a code change — re-measure and
+re-derive.
 
 **The §5 chain, as it actually happened:**
 
@@ -113,21 +112,32 @@ re-measured; never carry a timing number across a code change.
 2. **Re-derived projection (single GPU)**: fold wall cost grows with
    the train window (776 → 1533 dates across the four folds), so
    ~170 s for fold 1 projects to ≈ **11 h for the 160 runs** — no
-   margin under the session cap, and over the 9 h committed-GPU guard.
-3. **The lever that fits: the second T4.** `run_all(devices=...)`
-   schedules FOLDS across devices — one thread per GPU, folds paired
-   longest+shortest (`_assign_folds`, deterministic from train-window
-   length). Pure scheduling: every run reseeds itself
-   (`train_one_seed` → `set_seed(seed)`), so results are
-   bitwise-identical to the serial schedule — pinned by
-   `tests/test_device_parallel.py`. Re-derived projection: **≈5.5–6 h**
-   for the 160 runs — clears the cap with wide margin.
+   margin under the session cap.
+3. **The two-device detour — and why it was removed.** A thread-per-GPU
+   fold scheduler (`run_all(devices=...)`, `_assign_folds`) projected
+   ≈5.5–6 h and was implemented — then REMOVED as a correctness fix:
+   threads share the process-global RNG state, so one thread's
+   `set_seed(seed)` can land between another thread's `set_seed` and
+   its model construction, and `torch.cuda.manual_seed_all` resets
+   both devices' generators (clobbering the other thread's in-flight
+   training). Rule 15's random-init discipline needs the
+   seed → construct → train sequence to be the only RNG consumer
+   active; a lock around `set_seed` does not close that race — only
+   removing the concurrency does. Folds now run SEQUENTIALLY on one
+   T4; `cuda:1` sits idle by design.
+4. **Current projection**: ≈ **10–11 h** of training for the 160 runs
+   plus ~20 min for Cells 0–1 and 3–7. It fits the 12 h session cap
+   with a THIN (~1 h) margin — not the wide margin the single-session
+   spec asks for. That trade (RNG correctness over wall clock) is
+   deliberate; the operator should weigh it before committing the run.
 
 **First checkpoint — the §5 halt inside Cell 2.** After the first grid
 variant finishes, Cell 2 prints the measured s/run and the projection
 for all 160 runs, and **halts the session** if the projection exceeds
-9 h. If it halts: stop, re-derive the projection, do not burn the
-session hoping it speeds up. Also read the per-seed timing line:
+~11.3 h — the training budget inside the 12 h cap after the other
+cells' ~20 min. If it halts: stop, re-derive the projection, do not
+burn the session hoping it speeds up — there is no parallel speedup
+left to rediscover. Also read the per-seed timing line:
 
 ```
   --- seed 0 ---
@@ -204,7 +214,7 @@ dataset already attached to a notebook stays pinned to the version it
 was added at: pushing a new `kaggle datasets version` does not update
 the attachment, and the session keeps running the old code with no
 error at all. If Cell 0's fingerprint differs from the staging script's
-(`a8410c951d5d4622410a57285667cdeceb72c5bf3f73b68beab1e4997c2fad6c` as
+(`7fb6dd216927134c0eb727e9e14182795662af3eb6e283054a1c27011c4015a8` as
 of this writing), remove the dataset from Add Input, re-add it,
 restart, and compare again — do not start training. (The fingerprint
 changes every time `train.py` / `verify_env.py` / any staged module

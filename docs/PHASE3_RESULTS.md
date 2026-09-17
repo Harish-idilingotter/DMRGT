@@ -265,10 +265,13 @@ Reference floors, same harness, no special casing
   drop, everything else complete — `tests/test_frozen_graph.py`);
   staged-tree import parity (`tests/test_kaggle_staging_sync.py` — 11
   modules, fingerprint order pinned against `verify_env.STAGED_MODULES`);
-  two-device fold scheduling pinned schedule-invariant
-  (`tests/test_device_parallel.py` — parallel bitwise-equal to serial,
-  deterministic longest+shortest fold pairing, per-device failure
-  propagation).
+  two-device fold scheduling **removed post-commit** (§2A of the
+  parallelism fix): the thread-per-GPU fan-out shares the process-global
+  RNG state, so Rule 15's seed → construct → train discipline cannot
+  hold under concurrency — `train.run_all` now runs folds sequentially
+  on one device, and the parallel schedule's tests
+  (`tests/test_device_parallel.py`, commit 54c2b26) were deleted with
+  the construct they pinned.
 - **Batched message passing ≡ per-sample loop** — the first Session A
   attempt measured **300 s for one `(fold, seed)`**, the smallest fold,
   which extrapolates to ≈16 h for the 140-run grid against a ~12 h Kaggle
@@ -303,14 +306,17 @@ Reference floors, same harness, no special casing
   (2.4× ratio) — materially above the spec's ~50 s/run assumption, so
   the projection was re-derived per §5 rather than trusted. Growing
   train windows (776 → 1533 dates) put the 160-run single-GPU total at
-  ≈11 h: no margin. The lever that fit was the second T4 the
-  accelerator already provides: `run_all(devices=...)` schedules folds
-  across one thread per GPU, paired longest+shortest from a static cost
-  proxy (train-window length; `_assign_folds`). Scheduling cannot
-  change any number — every run reseeds itself — and
-  `tests/test_device_parallel.py` pins the parallel schedule
-  bitwise-identical to the serial one. Re-derived projection ≈5.5–6 h,
-  clearing the session cap with wide margin.
+  ≈11 h: no margin. The second T4 was then drafted as a scheduling
+  lever (thread-per-GPU fold fan-out, projected ≈5.5–6 h) and removed
+  again the same day: threads share the process-global RNG state, so
+  Rule 15's random-init discipline cannot hold under concurrency — a
+  correctness bug, not a scheduling choice. Folds run sequentially on
+  one T4; the final projection is ≈ **10–11 h** for the 160 runs. It
+  fits the 12 h session cap with a thin (~1 h) margin, not the wide
+  margin the single-session spec asks for — the Cell 2 halt was
+  recalibrated to the honest fits-the-cap line (~11.3 h), and the
+  wall-clock-vs-correctness trade is the operator's to accept before
+  committing the run.
 
 ## 8. Reproducibility record
 

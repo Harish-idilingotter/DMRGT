@@ -35,7 +35,6 @@ import json
 import platform
 import subprocess
 import sys
-import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -609,32 +608,6 @@ def _load_manifest() -> list:
     return []
 
 
-def _assign_folds(folds: list, n_devices: int) -> list[list]:
-    """Split folds across devices, balanced by train-window length.
-
-    A fold's wall cost grows with its train window (more dates per
-    epoch at the same epoch cap), so window length is a static,
-    deterministic cost proxy — no timing information needed. Two
-    devices get the longest+shortest pairing (for the 4 walk-forward
-    folds that is the perfectly balanced split: {f1, f4} vs {f2, f3});
-    any other device count gets round-robin over the descending order.
-    """
-    if n_devices <= 1:
-        return [list(folds)]
-    order = sorted(folds, key=lambda f: len(f.train_dates), reverse=True)
-    buckets: list[list] = [[] for _ in range(n_devices)]
-    rest = order
-    if n_devices == 2 and len(order) >= 4:
-        buckets[0].append(order[0])
-        buckets[1].append(order[1])
-        buckets[0].append(order[-1])
-        buckets[1].append(order[-2])
-        rest = order[2:-2]
-    for i, f in enumerate(rest):
-        buckets[i % n_devices].append(f)
-    return buckets
-
-
 def _train_fold(
     fold,
     features: pd.DataFrame,
@@ -647,13 +620,11 @@ def _train_fold(
     ckpt_dir: Path,
     device: torch.device,
 ) -> tuple[list[dict], dict[str, list], dict]:
-    """Train every seed of ONE fold on ONE device (see run_all).
+    """Train every seed of ONE fold (see run_all).
 
-    Thread-safe by construction: touches only its own fold's tensors,
-    its own checkpoint files, and its own local containers — the caller
-    merges the outputs after all folds join. Every run reseeds itself
-    (`train_one_seed` → `set_seed(seed)`), so the schedule cannot
-    change any number.
+    Touches only its own fold's tensors, its own checkpoint files, and
+    its own local containers; the caller merges the outputs after the
+    loop. Every run reseeds itself (`train_one_seed` → `set_seed(seed)`).
     """
     print(f"\n[train] === fold {fold.fold_idx} {fold.name!r} on {device} ===")
     print(f"  train: {fold.train_dates[0].date()} → "
@@ -764,21 +735,16 @@ def run_all(
     output_suffix: str = "",
     verify_hashes: bool = True,
     hashes: dict[str, str] | None = None,
-    devices: list[str] | None = None,
 ) -> pd.DataFrame:
     """Train model_id over all folds × seeds; write
     predictions_{model_id}{suffix}.parquet (val AND test rows),
     train_metrics_{model_id}{suffix}.json, checkpoints, and append to the
     accumulating run_manifest.json. Returns the predictions frame.
 
-    `devices` schedules FOLDS across devices (e.g. ["cuda:0", "cuda:1"]
-    on the T4 x2 accelerator — the grid's ~11 h single-GPU projection
-    only cleared the session cap once the second T4 carried half the
-    folds). Pure scheduling: every run still reseeds itself
-    (`train_one_seed` → `set_seed(seed)`), so results are bitwise
-    identical to the serial schedule; folds are merged in their original
-    chronological order. None → the one default device, exactly the old
-    behaviour."""
+    Folds run SEQUENTIALLY on the one default device — the two-device
+    fold scheduler was removed (§2A of the parallelism fix): threads
+    share the process-global RNG state, so Rule 15's seed → construct →
+    train discipline cannot be guaranteed under concurrency."""
     model_name = f"{model_id}{output_suffix}"
     paths.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     ckpt_dir = paths.CHECKPOINTS_DIR
@@ -806,16 +772,10 @@ def run_all(
             "verify_cache_hashes() call."
         )
 
-    if devices:
-        device_list = [torch.device(d) for d in devices]
-    else:
-        device_list = [torch.device("cuda" if torch.cuda.is_available()
-                                    else "cpu")]
-    print(f"[train] device(s): "
-          + ", ".join(
-              f"{d} ({torch.cuda.get_device_name(d)})"
-              if d.type == "cuda" else str(d)
-              for d in device_list))
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"[train] device: {device}"
+          + (f" ({torch.cuda.get_device_name(device)})"
+             if device.type == "cuda" else ""))
 
     # ── edge source by arm (§8) ───────────────────────────────────────
     edge_path = resolve_edge_source(model_id, cfg, edge_source)
@@ -833,61 +793,26 @@ def run_all(
     folds = sp.make_folds(cfg, available_dates=features["date"].unique())
     seeds = list(cfg["training"]["seeds"])
 
-    buckets = _assign_folds(folds, len(device_list))
-
-    def _run_bucket(bucket_folds: list, device: torch.device) -> tuple:
-        rows: list[dict] = []
-        entries: dict[str, list] = {}
-        results: list[dict] = []
-        for fold in bucket_folds:
-            r, m, fr = _train_fold(fold, features, targets, cfg, graphs,
-                                   model_id, model_name, seeds, ckpt_dir,
-                                   device)
-            rows.extend(r)
-            entries.update(m)
-            results.append(fr)
-        return rows, entries, results
-
-    if len(device_list) == 1:
-        all_predictions, all_metrics, fold_results = _run_bucket(
-            buckets[0], device_list[0])
-    else:
-        # One thread per device; each thread trains its folds' seeds
-        # sequentially. Every run reseeds itself (`train_one_seed` →
-        # `set_seed(seed)`), so scheduling cannot change any number —
-        # this is wall-clock engineering only.
-        errors: list[tuple[str, BaseException]] = []
-        per_device: dict[int, tuple] = {}
-
-        def _worker(idx: int) -> None:
-            try:
-                per_device[idx] = _run_bucket(buckets[idx],
-                                              device_list[idx])
-            except BaseException as e:  # noqa: BLE001 — re-raised below
-                errors.append((f"device {device_list[idx]}", e))
-
-        threads = [threading.Thread(target=_worker, args=(i,),
-                                    name=f"train-device-{i}")
-                   for i in range(len(device_list))]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-        if errors:
-            where, first = errors[0]
-            raise RuntimeError(
-                f"fold training failed on {where}") from first
-        all_predictions, all_metrics, fold_results = [], {}, []
-        for i in range(len(device_list)):
-            rows, entries, results = per_device[i]
-            all_predictions.extend(rows)
-            all_metrics.update(entries)
-            fold_results.extend(results)
-        # Restore the chronological order the serial schedule produces —
-        # devices finish in whatever order their folds' costs dictate.
-        fold_order = {f.name: i for i, f in enumerate(folds)}
-        fold_results.sort(key=lambda fr: fold_order[fr["fold"]])
-        all_predictions.sort(key=lambda r: fold_order[r["fold"]])
+    # ── folds run SEQUENTIALLY, one device (§2A of the parallelism fix) ─
+    # The two-device fold scheduler (one thread per GPU) was removed as a
+    # correctness fix, not a scheduling preference: threads share the
+    # process-global RNG state, so one thread's `set_seed(seed)` can land
+    # between another thread's `set_seed` and its model construction — and
+    # `torch.cuda.manual_seed_all` resets BOTH devices' generators,
+    # clobbering the other thread's in-flight training. Rule 15's
+    # random-init discipline needs the seed → construct → train sequence
+    # to be the only RNG consumer active; only a single sequential stream
+    # guarantees that. cuda:1 sits idle by design.
+    all_predictions: list[dict] = []
+    all_metrics: dict[str, list] = {}
+    fold_results: list[dict] = []
+    for fold in folds:
+        r, m, fr = _train_fold(fold, features, targets, cfg, graphs,
+                               model_id, model_name, seeds, ckpt_dir,
+                               device)
+        all_predictions.extend(r)
+        all_metrics.update(m)
+        fold_results.append(fr)
 
     # ── write predictions ────────────────────────────────────────────
     pred_df = pd.DataFrame(all_predictions)
@@ -945,7 +870,7 @@ def run_all(
         "cuda_available": bool(torch.cuda.is_available()),
         "gpu_name": (torch.cuda.get_device_name(0)
                       if torch.cuda.is_available() else "none"),
-        "devices": [str(d) for d in device_list],
+        "devices": [str(device)],
         "model_id": model_id,
         "model_name": model_name,
         "output_suffix": output_suffix,
