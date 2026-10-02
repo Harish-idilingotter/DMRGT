@@ -507,7 +507,7 @@ def evaluate_predictions(
     if universe is None:
         universe = list(cfg["universe"]["tickers"])
     pred_df = (source if isinstance(source, pd.DataFrame)
-               else load_predictions(source, split=split))
+               else load_predictions(source=source, split=split))
     pred_df = apply_postprocessing(pred_df, postprocessing)
 
     if split is not None:
@@ -601,7 +601,7 @@ def backtest(
     two arms would be meaningless.
     """
     df = (predictions if isinstance(predictions, pd.DataFrame)
-          else load_predictions(predictions, split=split))
+          else load_predictions(source=predictions, split=split))
     if targets is None:
         targets = pd.read_parquet(paths.TARGETS)
     results = evaluate_predictions(df, targets, cfg, split=split,

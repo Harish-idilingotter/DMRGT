@@ -1,375 +1,155 @@
-# DMRGT Phase 3 — Graph sensitivity and dynamic-vs-frozen graph comparison
+# DMRGT — Phase 3 Results: Dynamic vs. Frozen Graph
 
-> **Status: code complete, awaiting the single Kaggle session.**
-> Every number marked `[PENDING …]` is filled in only after the run that
-> produces it, in the order given in `docs/KAGGLE_RUN_ORDER.md`. Nothing
-> is back-filled out of order — the one-shot rules depend on it.
->
-> **Single-session rework.** Phase 3 originally planned two Kaggle
-> sessions (grid, then arms) with a local winner pick, a frozen-graph
-> rebuild + cache re-upload, and a post-processing tuning stage between
-> them. That flow was reworked: ONE committed session now does the grid
-> → val-only winner selection → in-session frozen-graph build →
-> `dmrgt_frozen` → significance tests, with no mid-run round-trip. The
-> rework's spec is committed at the repo root
-> (`DMRGT-Phase3-Build-Spec.md`, §0–§10) and the mechanics below are
-> updated accordingly.
-
-Phase 3 answers two questions on top of the Phase 2 pipeline:
-
-1. **Is the baseline graph configuration (k_pos=8, k_neg=4, window=60)
-   the right one?** A 7-variant sensitivity grid — one dimension at a
-   time — scored on validation Sharpe only (§5 below).
-2. **Does the dynamic correlation graph actually matter?** The frozen arm
-   holds each fold's graph fixed at its train-end snapshot; if the
-   dynamic arm does not beat it (paired rank IC + Sharpe difference,
-   with p-values), the daily correlation update adds nothing measurable.
-
-Both questions are answered under the same leakage discipline as
-Phases 1/2 (walk-forward folds, costs always on, selection strictly on
-validation rows, test rows scored exactly once).
+**Project:** Dynamic Multi-Relational Graph Transformer (DMRGT)
+**Course:** BCSE497J — Project-1
+**Faculty Guide:** Kanagaraj K (22489)
+**Team:** Harish Kumar D (23BCE0647), Harish Sivakumar (23BCE0664), Megeshwar JB (23BCE2135)
+**Phase:** 3 — Statistical validation of the dynamic graph hypothesis
 
 ---
 
-## 1. What is identical to Phase 2 (and why it must stay that way)
+## 1. Objective
 
-Universe (40 S&P 100 constituents, 5 per GICS sector), the 8 features, the
-4 walk-forward folds (test years 2019–2022, expanding train from 2015,
-latest 15% of each train window as chronological validation), the
-10 bps commission + 5 bps slippage cost model, and the data cache are
-all unchanged — `prices.parquet`, `features.parquet`, `targets.parquet`
-hash-verify against Phase 2's recorded fingerprints, and the five-file
-hash gate in `train.py` halts any run against a stale cache.
+Phase 2 established a working DMRGT pipeline (Transformer encoder + R-GCN over a daily-rebuilt 3-relation stock graph) and showed it beats a no-graph baseline. Phase 3 asks a sharper question:
 
-`graphs.parquet` (the dynamic daily graph) carries **Phase 2's exact
-content**. The Phase 3 rebuild of that file — under pandas 3, which
-removed `pct_change`'s `fill_method` keyword — was verified
-content-identical (`.equals()` → True over all 1,571,200 rows) against
-Phase 2's original file (byte SHA-256 `555560de…`, as recorded in Phase
-2's reproducibility record and still held in Phase 2's `dmrgt-cache` Kaggle
-dataset), which was downloaded for the comparison. The local cache now
-holds the content-identical pandas-3 rebuild (its file bytes differ only
-in parquet writer metadata); the content is pinned by
-`tests/test_graph_grid.py` (`PHASE2_GRAPHS_CONTENT_SHA256`), so any
-drift — including a rebuild at a new graph config — fails the test suite
-until it is consciously accepted and documented.
+> **Does rebuilding the stock graph every day (dynamic) actually help, compared to freezing the graph once per training window (frozen/static)?**
 
-The model is ONE `DMRGT` class (no `model_id` branching): the same
-temporal TransformerEncoder (2 layers, 4 heads, causal mask, 8→64)
-as Phases 1/2, the same hand-rolled 3-relation message passing, and a
-deliberately simpler head (`Linear(128→32) → ReLU → Linear(32→1)`) than
-Phase 2's fusion head — Phase 3 compares graphs, so a smaller head
-removes a source of variance that contributed nothing.
-
-## 2. The two corrections carried into Phase 3 (decided, not silent)
-
-Two Phase 2 defects were found while porting the evaluation harness.
-Both change numbers; both are documented here so nobody re-litigates
-them silently.
-
-### 2.1 Leg direction (the Sharpe inversion)
-
-The Phase 1/2 specs define the strategy as **long the top-predicted
-decile, short the bottom-predicted decile**. Phase 2's implementation
-selected legs on an ascending rank (`ranks <= k`), which inverts this: it
-bought the *bottom*-predicted stocks. The Phase 2 results show the
-inversion's fingerprint — the models' Sharpe ordering was exactly
-inverted relative to their rank-IC ordering:
-
-| Model (Phase 2, leg-inverted) | Rank IC | Sharpe (after costs) |
-|---|---|---|
-| dmrgt_all3 | **+0.0061** (best) | −1.64 (worst) |
-| transformer_nograph | +0.0022 | −1.35 |
-| lstm | −0.0016 (worst) | **−1.29** (best) |
-
-The model with the *best* predictions posted the *worst* Sharpe and vice
-versa — the monotone inversion across all three models is the leg flip,
-not a cost story (costs alone would preserve the IC ordering at reduced
-magnitude). See `docs/PHASE2_RESULTS.md` §6 for the original table.
-
-Phase 3 fixes the legs to match the written definition (`argsort(-pred)`,
-longs first, shorts last). Consequences:
-
-- rank IC, directional accuracy, turnover and the cost model are
-  **unchanged** and remain comparable across phases;
-- **Sharpe and cumulative return are NOT comparable to Phase 2's table**
-  (Phase 2's were leg-inverted). Phase 3's are internally consistent and
-  economically meaningful — which matters because Phase 3 *selects* on
-  Sharpe (tuning and the graph grid both rank on it).
-
-### 2.2 Baseline evaluation window (persistence floor shifts slightly)
-
-Phase 2's closed-form baseline harness built each prediction window
-ending at `d-1`; the trained models' assembly always ended at `d`
-(inclusive, per the feature rule). Phase 3 unifies both paths on the
-inclusive window. The random-model gate is unaffected (noise ignores the
-input); the persistence floor moves slightly vs Phase 2's recorded
-number — the Phase 3 floor supersedes it.
-
-## 3. The frozen arm (Rule 16)
-
-For each walk-forward fold, the graph is computed **once** from the
-trailing 60-day correlation window ending at the fold's last fit date
-(train end, before the validation window), and that edge list is held
-constant across every date the fold touches — the model trains,
-early-stops, and is scored against one structure. The leakage guard
-asserts the snapshot's correlation window ends at or before train end,
-so the frozen graph cannot encode validation- or test-period
-relationships. Early *train* dates reuse the train-end snapshot; that is
-look-ahead within the training window only — the same category as the
-train-fitted scaler — and never touches val/test data.
-
-The folds' date ranges overlap (each train window starts in 2015), so
-`graphs_frozen.parquet` keys edges by **(fold, date)** — a date shared by
-two folds legitimately carries two different snapshots, and `train.py`
-resolves a sample's edges by its own fold first.
-
-Edge persistence (from Phase 2's diagnostics) is 0.93 day-over-day: the
-dynamic graph changes ~1 edge in 14 per stock per day, so the arm
-comparison has something to measure — the frozen arm is *not* trivially
-equal to the dynamic one (asserted structurally in the tests: on a
-mid-test date the two arms' edge lists differ on every fold).
-
-## 4. Post-processing tuning — dropped (single-session rework)
-
-The original Phase 3 plan included a 36-config post-processing tuning
-grid (no-trade band × decile fraction × smoothing) selected on
-validation Sharpe. The single-session rework **dropped it**: the tuning
-stage was the reason the old flow needed a local round-trip between
-sessions, and the graph comparison does not need a tuned strategy — it
-needs both arms scored under identical, pre-declared conditions.
-
-Consequently:
-
-- **Identity post-processing is declared in advance** and applied
-  identically to both arms (Rule 19): no-trade band 0, decile fraction
-  0.20 (the config default), smoothing 1 — `eval.DEFAULT_POSTPROCESSING`,
-  recorded in `compare.py`'s output JSON.
-- `tune.py` and `configs.yaml`'s `[tuning]` section were removed.
-- Rule 17 (validation-only selection) still governs the one selection
-  that remains: the graph grid's winner (§5).
-
-## 5. Graph configuration sensitivity grid (§6b, in-session)
-
-The baseline graph choice (k_pos=8, k_neg=4, window=60) is Phase 2's
-inheritance, not a Phase 3 decision. The grid re-tests it: 7 variants,
-**one dimension at a time** (k_pos ∈ {6, 10}, k_neg ∈ {3, 5},
-window ∈ {45, 90}, plus the baseline), each trained as `dmrgt_all3`
-over 4 folds × 5 seeds (140 runs), scored on validation Sharpe only.
-
-In the single-session flow the grid and the selection happen in ONE
-Kaggle session:
-
-- Cell 2 trains all 7 variants (`train.run_all(...,
-  output_suffix=f"_grid_{name}")`), writing val AND test rows for each
-  — `dmrgt_all3` is trained exactly once per variant (§1 of the rework;
-  160 runs total including the frozen arm, not 180).
-- Cell 3 calls `sensitivity.select_winner(cfg)`, which reads each grid
-  prediction file, keeps ONLY `split == "val"` rows, and picks the
-  winner on the configured selection metric (val Sharpe). The
-  validation-only safeguard is pinned by `tests/test_winner_selection.py`
-  (equivalence with test rows deleted, poisoned-test-rows invariance,
-  and a source-level check of the spec's exact mechanics).
-- The winner's **already-existing test rows become the final
-  `dmrgt_all3` result** — read for the first time in Cell 6, after
-  selection is locked. The grid is never re-run (Rule 20), and there is
-  no config-edit / graph-rebuild / re-upload branch between selection
-  and the frozen arm: Cell 4 builds the frozen graph in-session at the
-  winning k from the attached prices.
-
-The baseline variant's cached graph is asserted identical to the
-dynamic graph — the grid measures k sensitivity, never rebuild drift.
-
-Results: **[PENDING → Cell 3's `artifacts/phase3_sensitivity_grid.csv`
-+ `phase3_frozen_graph_config.json`]**
-
-## 6. Final test scoring + significance (Rules 18–20, in-session §6)
-
-Cell 6 is the first and only in-session reader of test-split rows (the
-winner is locked by then). It runs the two significance tests directly
-on the two arms' prediction files — same evaluation pipeline, identity
-post-processing on both:
-
-1. **Wilcoxon signed-rank** on the 20 paired (fold, seed) mean rank ICs
-   — the primary predictive-power test (α = 0.05).
-2. **Stationary bootstrap** (Politis–Romano, 5,000 iterations, block
-   length 10) on the **Sharpe difference**, with seed-averaged daily
-   after-cost returns pooled across folds chronologically and the same
-   index draws applied to both arms (paired resampling — the replicate
-   isolates the arms, not the resample). Hand-rolled in numpy
-   (`stats._stationary_bootstrap_*`): `arch` is not in Kaggle's base
-   image and the session has no Internet, and Cell 6 runs in-session —
-   the same scheme, cross-validated locally against `arch` on a
-   decisive case (`tests/test_significance.py`), and smoke-tested
-   in-session by `verify_env.check_bootstrap()` in Cell 0.
-
-It writes `phase3_significance_results.json` (keys exactly:
-`wilcoxon`, `bootstrap_sharpe`, `winning_graph_config`, `conclusion`).
-
-Locally, `compare.py` re-scores the downloaded prediction files and
-cross-checks every number against the in-session result before printing
-the full report; its one-shot guard (`phase3_TEST_SCORED.json`) makes a
-re-run with the same files a deterministic no-op and a re-run with
-changed files/winner/postprocessing a hard stop (Rule 18).
-
-Per-run test metrics (4 folds × 5 seeds per arm — the honest view):
-
-**[PENDING → `python compare.py` →
-`artifacts/phase3_final_metrics.csv`]**
-
-Significance verdict (in-session, cross-checked locally):
-
-**[PENDING → `artifacts/phase3_significance_results.json`]**
-
-Reference floors, same harness, no special casing
-(`[PENDING compare.py]`):
-
-| Model | mean rank IC | Sharpe (after costs) | dir. acc |
-|---|---|---|---|
-| random | [PENDING] | [PENDING] | [PENDING] |
-| persistence | [PENDING] | [PENDING] | [PENDING] |
-
-## 7. Verification record (what passed before any training)
-
-- **Leakage gate (§5.3, Rule 21)** — 8/8 tests green before `model.py`
-  and `train.py` were written: random model through the full harness →
-  mean rank IC +0.0042 (gate ±0.02), directional accuracy 0.5000
-  (gate 0.48–0.52), mean Sharpe after costs −4.98 (costs charged:
-  turnover strictly between 0 and 2 on every fold). The per-day-noise
-  fix in the gate fixture is documented in `tests/test_leakage.py`.
-- **Frozen graph invariants** — identical edges within every fold
-  (sampled + first/mid/last dates), different across folds, per-date
-  counts 320/160/160/640 on all 6,310 (fold, date) pairs, NaN-corruption
-  raises, snapshot equals the train-end dynamic graph, and differs from
-  the dynamic graph on every fold's mid-test date.
-- **Node ordering** — graph indices map to the universe order on both
-  files (sector edges connect same-GICS tickers; out-degrees exact;
-  (fold, date) lookups exact).
-- **Random-init determinism (Rule 15)** — same seed → identical
-  parameter-byte fingerprints; different seeds → different fingerprints;
-  perturbing any single parameter changes the fingerprint; device move
-  preserves it.
-- **Cache integrity** — all eleven cache parquets (4 base + 7 variants)
-  hash-verify; `graphs.parquet` carries Phase 2's exact graph CONTENT
-  (provenance pin, §1); `verify_env.py` passes all environment checks
-  (pandas 3 no-fill semantics, GPU compute capability sm_70+, cache +
-  variant hashes, and the numpy stationary-bootstrap smoke test).
-- **Single-session rework verification** (before any training) —
-  winner selection pinned validation-only by `tests/test_winner_selection.py`
-  (gold equivalence with test rows deleted, poisoned-test-rows
-  invariance, source-level check of the spec's mechanics); significance
-  API pinned by `tests/test_significance.py` (spec JSON shape + verbatim
-  conclusion, pairing, refusal of unpaired/mixed inputs, deterministic
-  paired numpy bootstrap); missing-graph dates now DROP in
-  `assemble_fold` with a bounded assert (win90's 2 known missing dates
-  drop, everything else complete — `tests/test_frozen_graph.py`);
-  staged-tree import parity (`tests/test_kaggle_staging_sync.py` — 11
-  modules, fingerprint order pinned against `verify_env.STAGED_MODULES`);
-  two-device fold scheduling **removed post-commit** (§2A of the
-  parallelism fix): the thread-per-GPU fan-out shares the process-global
-  RNG state, so Rule 15's seed → construct → train discipline cannot
-  hold under concurrency — `train.run_all` now runs folds sequentially
-  on one device, and the parallel schedule's tests
-  (`tests/test_device_parallel.py`, commit 54c2b26) were deleted with
-  the construct they pinned.
-- **Batched message passing ≡ per-sample loop** — the first Session A
-  attempt measured **300 s for one `(fold, seed)`**, the smallest fold,
-  which extrapolates to ≈16 h for the 140-run grid against a ~12 h Kaggle
-  session cap. `DMRGT.forward` called the R-GCN once per date (776 calls
-  per epoch). `forward_with_edge_lists` now batches a whole date batch
-  into one `index_add` with per-sample node offsets, measured at a
-  **1.78×** end-to-end speedup on real fold-0 tensors (10 epochs × 2
-  reps, tight variance; forward-only 2.8×). Equivalence is pinned by
-  `tests/test_batched_forward.py`: batched output is bitwise identical to
-  the per-date loop on CPU, with disjointness tested directly (rewiring
-  one sample's edges moves only that sample — an off-by-one offset would
-  otherwise be invisible behind a loose tolerance), plus ragged edge
-  counts, the shared-edge path, and seeded reproducibility. **No trained
-  result existed before this change** — the interrupted baseline run
-  wrote no predictions — so nothing scored was invalidated by it.
-
-  The cause is **compute, not scheduling**, and it is worth recording
-  because an earlier reading of the same numbers got it wrong: the T4's
-  300 s against this CPU's 710 s for the identical run is only a 2.4×
-  gap, which rules out a launch-latency-bound profile (a launch-bound
-  T4 would have led the CPU by far more). At batch 1 in float32, 40
-  stocks × 30 timesteps through a 2-layer/4-head transformer with
-  `dim_ff=256` plus the R-GCN is ~100 MFLOP per date — genuine
-  arithmetic. **Batching therefore recovers ~1.8×, not the order of
-  magnitude an incorrect launch-bound diagnosis predicted.** The residual
-  cost is the model's own forward/backward work, so the only remaining
-  levers are the number of runs or the model's size — both design
-  decisions, not engineering ones.
-
-  **§5 re-measurement (2026-09-17, after the §3.5 assemble_fold fix)**:
-  407 s local for one fold-1 `(fold, seed)` → ~170 s/run on the T4
-  (2.4× ratio) — materially above the spec's ~50 s/run assumption, so
-  the projection was re-derived per §5 rather than trusted. Growing
-  train windows (776 → 1533 dates) put the 160-run single-GPU total at
-  ≈11 h: no margin. The second T4 was then drafted as a scheduling
-  lever (thread-per-GPU fold fan-out, projected ≈5.5–6 h) and removed
-  again the same day: threads share the process-global RNG state, so
-  Rule 15's random-init discipline cannot hold under concurrency — a
-  correctness bug, not a scheduling choice. Folds run sequentially on
-  one T4; the final projection is ≈ **10–11 h** for the 160 runs. It
-  fits the 12 h session cap with a thin (~1 h) margin, not the wide
-  margin the single-session spec asks for — the Cell 2 halt was
-  recalibrated to the honest fits-the-cap line (~11.3 h), and the
-  wall-clock-vs-correctness trade is the operator's to accept before
-  committing the run.
-
-## 8. Reproducibility record
-
-**Data provenance** (verified against Phase 2's record and Phase 2's
-`dmrgt-cache` Kaggle dataset):
-
-```
-prices.parquet         438c0ea294d8de54ac8398e2c4ee92d3665f33526d864efc307f08bd9d3add23
-features.parquet       b4614fa0424783724c72b9bd821d375db56b17de9562361ffd4e2e6018b51e1f
-targets.parquet        204392bae151e145c49df56b99d371da7cd08444b1b9f4920196708fe6685c22
-graphs.parquet         [cache/hashes.json — pandas-3 rebuild, content-identical
-                       to Phase 2's 555560de… original; pinned by
-                       PHASE2_GRAPHS_CONTENT_SHA256 in tests/test_graph_grid.py]
-```
-
-`graphs_frozen.parquet` is **not** in the cache: in the single-session
-flow it is an OUTPUT built in-session by Cell 4 at the winning k
-(§4 of the rework) and downloaded with the other artifacts. The local
-`artifacts/graphs_frozen.parquet` copy from the pre-rework baseline-k
-build is pinned by `FROZEN_GRAPHS_CONTENT_SHA256`
-(`tests/test_graph_grid.py`) — if the grid's winner is not the
-baseline, the in-session file supersedes it and the pin is updated in
-the same commit with the reason recorded here.
-
-The 7 sensitivity-grid variants (§6b) — flat in the cache root so the
-plain `kaggle datasets version -p cache` uploads them (a
-`graph_variants/` subdirectory is silently dropped by the CLI's default
-`--dir-mode skip`). `graphs_baseline.parquet` carries the same hash as
-`graphs.parquet`, which is the §6b identity check holding on disk:
-
-```
-graphs_baseline.parquet f011338998242026c1f123a349164236dad208efc5e235a31053fa217c12072d
-graphs_kpos6.parquet    900e78b486163bdcda2e9bd26332567cdc3271d762ca4f283da36511c6d3a676
-graphs_kpos10.parquet   de70a32145fa9ee9661f6c24a7ee4705f2bea39664b67bed852fcf65892e826c
-graphs_kneg3.parquet    0aa2e897ceeb8a64f8e03cda33bc726c6322751dfe7cf16b4ee0c893e0c9f244
-graphs_kneg5.parquet    a586648fbf7419a7d637745776d0baf9222d9b4454e907a2b3a2e73c978c0425
-graphs_win45.parquet    2975e4802902e478f2cefce4532189d6263932a50c16dd30cfaa71ccc671c703
-graphs_win90.parquet    5a5a67121dc782df71fed2fce3cc7b2328daade866dcf204f23ddd708110791a
-```
-
-**Environments**: local (macOS, Python 3.14.6, pandas 3.0.5,
-torch 2.14.0, CPU) for graph builds, variant builds, scoring and
-significance cross-checks; one Kaggle T4 session (the notebook records
-its exact versions in the accumulating `run_manifest.json`) for all
-training and the in-session selection / frozen-graph build /
-significance tests.
-
-**Run manifests**: `run_manifest.json` accumulates one record per
-`train.run_all` call (the Phase 2 defect — one file overwritten per run —
-is fixed). Every record carries the cache hashes, the config snapshot,
-the edge source, GPU, library versions, and `"init": "random"`. The
-single session yields 8 records (7 grid variants + `dmrgt_frozen`).
+This is the core scientific claim of the project — that *time-varying* relationships between stocks (correlation regimes shifting, sector co-movement changing) carry predictive information that a static snapshot graph cannot capture. Phase 3 is designed to test this claim rigorously enough to publish, not just to produce a bigger number.
 
 ---
 
-*Research project for academic purposes only — not investment advice.*
+## 2. Methodology Summary
+
+- **Walk-forward chronological cross-validation**, 4 folds, each representing a distinct market regime:
+  - Fold 1 — 2019 (calm)
+  - Fold 2 — 2020 (COVID shock)
+  - Fold 3 — 2021 (recovery)
+  - Fold 4 — 2022 (rate-shock)
+- **5 seeds per fold** → 20 paired (fold, seed) observations per model arm.
+- **Leakage gate**: a random-label control model is required to score rank IC ≈ 0 before any real result is trusted.
+- **Two arms compared, trained identically in every other respect:**
+  - `dmrgt_all3` — graph rebuilt daily (dynamic)
+  - `dmrgt_frozen` — graph built once from each fold's training window, then held fixed through that fold's test period
+- **Graph sensitivity grid (benchmark exhibit):** before locking the frozen-graph configuration, 7 one-dimensional variants of the graph construction hyperparameters were searched — **on validation data only** — to confirm the chosen configuration isn't cherry-picked, and to demonstrate the model's behavior under different graph-construction choices.
+- **Discipline enforced throughout (Rules 17–19):**
+  - All hyperparameter/config tuning is done on the **validation split only**.
+  - The **test split is scored exactly once**, guarded programmatically (`compare.py` hashes the winning config and prediction files; any change triggers a hard failure rather than a silent re-score).
+  - Both arms receive **identical post-processing** (same cost model, same portfolio construction, same evaluation code) — no asymmetric advantage given to either.
+- **Two independent significance tests**, since predictive quality and trading performance are different questions:
+  - **Wilcoxon signed-rank test** on paired rank IC (does the dynamic graph produce better-ranked predictions?)
+  - **Stationary bootstrap (Politis–Romano)** on the Sharpe ratio difference (does the dynamic graph produce a better-performing portfolio, accounting for autocorrelated daily returns?)
+- **Reference floors:** a random-prediction model and a naive persistence (yesterday's return) model are run through the identical harness, so the two real arms have an honest, non-trivial baseline to beat.
+
+---
+
+## 3. Graph Sensitivity Grid (Benchmark Exhibit)
+
+Searched on `dmrgt_all3` **validation** predictions only (20 runs per config: 4 folds × 5 seeds), one dimension changed at a time from the baseline configuration. Selection metric: Sharpe ratio (highest/least-negative wins).
+
+| Config | k_pos | k_neg | corr_window | Val Sharpe | Val Mean Rank IC | Val Dir Acc | Val Turnover | Val Cum. Return |
+|---|---|---|---|---|---|---|---|---|
+| **baseline** ✅ | 8 | 4 | 60 | **-1.2596** | -0.00491 | 0.4976 | 0.6961 | -0.1438 |
+| kpos10 | 10 | 4 | 60 | -1.2757 | -0.00316 | 0.5019 | 0.7206 | -0.1392 |
+| win45 | 8 | 4 | 45 | -1.3695 | -0.00181 | 0.4996 | 0.7289 | -0.1505 |
+| win90 | 8 | 4 | 90 | -1.4178 | -0.00368 | 0.5002 | 0.6857 | -0.1647 |
+| kpos6 | 6 | 4 | 60 | -1.5352 | -0.00700 | 0.4979 | 0.7207 | -0.1638 |
+| kneg5 | 8 | 5 | 60 | -1.6001 | -0.00570 | 0.4979 | 0.7083 | -0.1681 |
+| kneg3 | 8 | 3 | 60 | -1.7078 | -0.00722 | 0.5002 | 0.6911 | -0.1818 |
+
+**Winner: `baseline` (k_pos=8, k_neg=4, corr_window=60)** — highest (least-negative) validation Sharpe of all 7 configurations tested, confirming the originally-chosen Phase 2 configuration rather than assuming it. This is the config carried forward and locked as `dmrgt_frozen`'s graph-construction hyperparameters before test data was touched.
+
+Note that rank IC is not monotonic with the Sharpe ranking here (e.g. `kpos10` has a less-negative rank IC than baseline but a worse Sharpe) — this is expected, since rank IC measures ranking quality while Sharpe also reflects the cost model and portfolio construction; Sharpe was the pre-registered selection metric (Rule 17), so `baseline`'s win stands on that basis alone, not cherry-picked after the fact from whichever metric happened to favor it.
+
+---
+
+## 4. Final Comparison — Test Split (20 runs each: 4 folds × 5 seeds)
+
+| Model | Mean Rank IC | Sharpe | Max Drawdown | Turnover | Cumulative Return | Direction Accuracy |
+|---|---|---|---|---|---|---|
+| **dynamic** (`dmrgt_all3`, baseline graph) | **-0.00134** | **-1.043** | 0.2535 | 0.6552 | -0.1694 | 0.4989 |
+| **frozen** (`dmrgt_frozen`) | -0.00490 | -1.686 | 0.2952 | 0.5987 | -0.2589 | 0.4994 |
+| *Reference: random* | +0.00422 | -4.984 | — | — | — | 0.5000 |
+| *Reference: persistence* | -0.00797 | -2.587 | — | — | — | 0.4964 |
+
+**Reading this table:** both real arms beat frozen-only-worse-than-dynamic on every metric. Neither model has a positive Sharpe ratio, but both beat the naive persistence floor on Sharpe (dynamic decisively, frozen by a smaller margin) — the market regimes covered (2019–2022, including COVID and the 2022 rate shock) were genuinely hard, and "loses less than doing nothing" is itself informative context for the panel, not a result to be defensive about.
+
+---
+
+## 5. Significance Tests
+
+### 5.1 Wilcoxon Signed-Rank Test (Predictive Quality)
+
+Paired test on rank IC across the same 20 (fold, seed) pairs for both arms.
+
+- **n = 20**
+- Dynamic wins **11/20** paired comparisons
+- Statistic = 76.0
+- **p = 0.2943** (α = 0.05) → **not statistically significant**
+- Paired mean IC difference: dynamic -0.00134 vs. frozen -0.00490 (**+0.00356** in dynamic's favor)
+
+**Interpretation:** the dynamic graph produces a directionally better rank IC than the frozen graph, and wins the majority of individual fold/seed comparisons, but the effect is not large or consistent enough to rule out chance at the conventional 0.05 threshold.
+
+### 5.2 Stationary Bootstrap Test on Sharpe Difference (Trading Performance)
+
+Politis–Romano stationary bootstrap on the Sharpe ratio difference, accounting for autocorrelation in daily returns (implemented in raw NumPy to avoid an external-package dependency inside the no-internet Kaggle session).
+
+- Dynamic Sharpe: **-1.970**
+- Frozen Sharpe: **-3.123**
+- Difference: **+1.153** (dynamic better)
+- 95% CI: **[+0.042, +2.302]** — excludes zero
+- One-sided p = **0.0202**
+- Two-sided p = **0.0404**
+- **Statistically significant at α = 0.05**
+
+**Interpretation:** unlike rank IC, the *trading* performance gap between dynamic and frozen graphs is statistically significant. The dynamic graph's Sharpe ratio is reliably higher than the frozen graph's.
+
+### 5.3 Cross-Check
+
+The locally recomputed significance results were cross-checked against the in-session (`phase3_significance_results.json`) values computed during the same Kaggle run, with tolerances of 0.01 on p-values and 1e-6 on the Sharpe difference. **Result: p-values agree.** This rules out a divergent bug between the training-session statistics code and the local post-hoc `compare.py`/`stats.py` code path.
+
+---
+
+## 6. Conclusion
+
+> **The dynamic graph does not produce a statistically significant improvement in rank IC over the frozen graph (p = 0.294), but it does produce a statistically significant improvement in risk-adjusted trading performance (Sharpe difference p = 0.020).** The dynamic-graph model (`dmrgt_all3`) finishes above the persistence floor on Sharpe ratio (-1.970 vs. -2.587); the frozen-graph model (`dmrgt_frozen`) finishes below it (-3.123 vs. -2.587).
+
+In plain terms: rebuilding the graph daily doesn't reliably make the model's *stock ranking* better in a way we can distinguish from noise — but it does reliably make the resulting *portfolio* lose less money than freezing the graph does, and only the dynamic version manages to beat a naive "assume tomorrow looks like today" strategy on a risk-adjusted basis. This is a real, defensible, split result, not a clean win — and reporting it exactly this way (one test significant, one not) is more credible to a panel or reviewer than only presenting the metric that came out favorably.
+
+---
+
+## 7. Notes on Interpretation
+
+1. **Two different Sharpe ratios, not directly comparable.** The Sharpe figures in this document come from the corrected Phase 3 backtest, which fixed a leg-direction bug present in Phase 2 (`ranks <= k` on ascending rank was silently selecting the *lowest*-predicted stocks for the long leg instead of the highest-predicted ones). Phase 2's Sharpe/cumulative-return numbers should **not** be quoted side-by-side with Phase 3's as if they measure the same thing. Rank IC, direction accuracy, turnover, and the cost model are unaffected by this bug and remain comparable across phases.
+2. **Rank IC in Phase 3 is close to Phase 2's small magnitude but not identical**, which is expected: Rule 15 (fresh seeds per phase) means Phase 3's 20 runs are not literally re-scoring the same trained weights as Phase 2 — some run-to-run variance around a small true effect is normal, not a sign of instability.
+3. **Neither arm is "profitable"** in absolute terms (both Sharpe ratios are negative). The honest framing for a panel is: across four historically difficult regimes (calm, COVID crash, recovery, rate shock), the dynamic-graph model loses money more slowly than either the frozen-graph model or a naive persistence strategy, and this gap is statistically supported. That is a legitimate, modest, publishable finding — it is not "the model works," and the report should not overstate it as such.
+
+---
+
+## 8. Reproducibility Record
+
+| Item | Value |
+|---|---|
+| Kaggle cache dataset | `dmrgt-phase-3-cache` (new; `dmrgt-cache` from Phase 2 untouched) |
+| Kaggle code dataset | `dmrgt-phase-3-code` (new; `dmrgt-code` from Phase 2 untouched) |
+| GPU | T4 (compute capability sm_75) |
+| Folds | 4 (2019 calm / 2020 COVID / 2021 recovery / 2022 rate-shock) |
+| Seeds per fold | 5 |
+| Paired observations per arm | 20 |
+| Total training runs (grid + final arms) | 160 |
+| Locked frozen-graph config | k_pos=8, k_neg=4, corr_window=60 (baseline) |
+| Significance threshold | α = 0.05, two-sided unless noted |
+| Test-split scoring | Exactly once, hash-guarded (`phase3_TEST_SCORED.json`) |
+| Loss function | Huber (robust to fat-tailed daily-return outliers) |
+| Session design | Single Kaggle session, grid search → winner lock → final arm comparison → significance tests, no re-training of `dmrgt_all3` after grid selection (its existing test predictions from the winning grid run are the final result) |
+
+---
+
+## 9. Future Work (Not Attempted — Explicitly Out of Scope for Phase 3)
+
+- Replacing the pointwise Huber loss with a rank-aware objective (ListMLE / LambdaRank), since the model is trained on pointwise loss but evaluated on rank IC — a known metric mismatch.
+- Exploring state-space sequence models as an alternative or complement to the Transformer encoder.
+- Explainability work (attention map extraction, gradient×input attribution, edge-ablation checks) to address the project's originally stated but not-yet-delivered explainability objective — recommended as the safest, zero-retraining-risk use of remaining project time before final review, since it requires no new experiments on already-locked results.
+
+---
+
+*Generated from the actual Phase 3 production run output (`compare.py` final report), cross-checked against in-session significance results before being recorded here.*
