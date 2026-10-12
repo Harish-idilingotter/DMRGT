@@ -1,0 +1,102 @@
+{
+  "tolerances": {
+    "feature_corr_min": 0.999,
+    "feature_median_abs_diff_max_std_mult": 1e-06,
+    "target_corr_min": 0.9999,
+    "target_frac_within_1e-6_min": 0.999,
+    "graph_identical_dates_min": 0.99
+  },
+  "dates_and_tickers": {
+    "prices": {
+      "dates_identical": true,
+      "tickers_identical": true,
+      "rows_new": 105630,
+      "rows_old": 105630
+    },
+    "features": {
+      "dates_identical": true,
+      "tickers_identical": true,
+      "rows_new": 98240,
+      "rows_old": 98240
+    },
+    "targets": {
+      "dates_identical": true,
+      "tickers_identical": true,
+      "rows_new": 100560,
+      "rows_old": 100560
+    }
+  },
+  "features": {
+    "f1_logret": {
+      "pearson": 1.0,
+      "median_abs_diff": 0.0,
+      "col_std": 0.01855136564003924,
+      "max_abs_diff": 0.0,
+      "pass": true
+    },
+    "f2_price_ma": {
+      "pearson": 0.9999999999999999,
+      "median_abs_diff": 0.0,
+      "col_std": 0.030276786022620163,
+      "max_abs_diff": 0.0,
+      "pass": true
+    },
+    "f3_rsi": {
+      "pearson": 1.0,
+      "median_abs_diff": 0.0,
+      "col_std": 12.148368129265128,
+      "max_abs_diff": 0.0,
+      "pass": true
+    },
+    "f4_macd": {
+      "pearson": 0.9999999999999999,
+      "median_abs_diff": 0.0,
+      "col_std": 2.8329697914649574,
+      "max_abs_diff": 0.0,
+      "pass": true
+    },
+    "f5_atr": {
+      "pearson": 1.0,
+      "median_abs_diff": 0.0,
+      "col_std": 0.011500381939464819,
+      "max_abs_diff": 0.0,
+      "pass": true
+    },
+    "f6_vol_zscore": {
+      "pearson": 0.9999999999999998,
+      "median_abs_diff": 0.0,
+      "col_std": 1.066758134781466,
+      "max_abs_diff": 0.0,
+      "pass": true
+    },
+    "f7_market_ret": {
+      "pearson": 1.0,
+      "median_abs_diff": 0.0,
+      "col_std": 0.011320248306084954,
+      "max_abs_diff": 0.0,
+      "pass": true
+    },
+    "f8_vix": {
+      "pearson": 1.0,
+      "median_abs_diff": 0.0,
+      "col_std": 7.355138630948827,
+      "max_abs_diff": 0.0,
+      "pass": true
+    }
+  },
+  "targets": {
+    "pearson": 1.0,
+    "frac_within_1e-6": 1.0,
+    "max_abs_diff": 0.0,
+    "pass": true
+  },
+  "graphs": {
+    "dates_new": 2455,
+    "dates_old": 2455,
+    "dates_common": 2455,
+    "identical_edge_set_dates": 2455,
+    "fraction": 1.0,
+    "pass": true
+  },
+  "passed": true
+}

@@ -1,0 +1,267 @@
+universe:
+  tickers:
+  - AAPL
+  - ABBV
+  - ABT
+  - ACN
+  - ADBE
+  - AMAT
+  - AMD
+  - AMGN
+  - AMT
+  - AMZN
+  - ANET
+  - AVGO
+  - AXP
+  - BA
+  - BAC
+  - BKNG
+  - BLK
+  - BMY
+  - BNY
+  - BRK-B
+  - C
+  - CAT
+  - CMCSA
+  - COF
+  - COP
+  - COST
+  - CRM
+  - CSCO
+  - CVS
+  - CVX
+  - DE
+  - DHR
+  - DIS
+  - DUK
+  - EMR
+  - FDX
+  - GD
+  - GE
+  - GILD
+  - GM
+  - GOOGL
+  - GS
+  - HD
+  - IBM
+  - INTC
+  - INTU
+  - ISRG
+  - JNJ
+  - JPM
+  - KO
+  - LIN
+  - LLY
+  - LMT
+  - LOW
+  - LRCX
+  - MA
+  - MCD
+  - MDLZ
+  - MDT
+  - META
+  - MMM
+  - MO
+  - MRK
+  - MS
+  - MSFT
+  - MU
+  - NEE
+  - NFLX
+  - NOW
+  - NVDA
+  - ORCL
+  - PANW
+  - PEP
+  - PFE
+  - PG
+  - PM
+  - QCOM
+  - RTX
+  - SBUX
+  - SCHW
+  - SO
+  - T
+  - TMO
+  - TMUS
+  - TSLA
+  - TXN
+  - UNH
+  - UNP
+  - UPS
+  - USB
+  - V
+  - VZ
+  - WFC
+  - WMT
+  - XOM
+  global_series:
+  - ^GSPC
+  - ^VIX
+  start_date: '2015-01-01'
+  end_date: '2024-12-31'
+sectors:
+  AAPL: Information Technology
+  ABBV: Health Care
+  ABT: Health Care
+  ACN: Information Technology
+  ADBE: Information Technology
+  AMAT: Information Technology
+  AMD: Information Technology
+  AMGN: Health Care
+  AMT: Real Estate
+  AMZN: Consumer Discretionary
+  ANET: Information Technology
+  AVGO: Information Technology
+  AXP: Financials
+  BA: Industrials
+  BAC: Financials
+  BKNG: Consumer Discretionary
+  BLK: Financials
+  BMY: Health Care
+  BNY: Financials
+  BRK-B: Financials
+  C: Financials
+  CAT: Industrials
+  CMCSA: Communication Services
+  COF: Financials
+  COP: Energy
+  COST: Consumer Staples
+  CRM: Information Technology
+  CSCO: Information Technology
+  CVS: Health Care
+  CVX: Energy
+  DE: Industrials
+  DHR: Health Care
+  DIS: Communication Services
+  DUK: Utilities
+  EMR: Industrials
+  FDX: Industrials
+  GD: Industrials
+  GE: Industrials
+  GILD: Health Care
+  GM: Consumer Discretionary
+  GOOGL: Communication Services
+  GS: Financials
+  HD: Consumer Discretionary
+  IBM: Information Technology
+  INTC: Information Technology
+  INTU: Information Technology
+  ISRG: Health Care
+  JNJ: Health Care
+  JPM: Financials
+  KO: Consumer Staples
+  LIN: Materials
+  LLY: Health Care
+  LMT: Industrials
+  LOW: Consumer Discretionary
+  LRCX: Information Technology
+  MA: Financials
+  MCD: Consumer Discretionary
+  MDLZ: Consumer Staples
+  MDT: Health Care
+  META: Communication Services
+  MMM: Industrials
+  MO: Consumer Staples
+  MRK: Health Care
+  MS: Financials
+  MSFT: Information Technology
+  MU: Information Technology
+  NEE: Utilities
+  NFLX: Communication Services
+  NOW: Information Technology
+  NVDA: Information Technology
+  ORCL: Information Technology
+  PANW: Information Technology
+  PEP: Consumer Staples
+  PFE: Health Care
+  PG: Consumer Staples
+  PM: Consumer Staples
+  QCOM: Information Technology
+  RTX: Industrials
+  SBUX: Consumer Discretionary
+  SCHW: Financials
+  SO: Utilities
+  T: Communication Services
+  TMO: Health Care
+  TMUS: Communication Services
+  TSLA: Consumer Discretionary
+  TXN: Information Technology
+  UNH: Health Care
+  UNP: Industrials
+  UPS: Industrials
+  USB: Financials
+  V: Financials
+  VZ: Communication Services
+  WFC: Financials
+  WMT: Consumer Staples
+  XOM: Energy
+  ^GSPC: global
+  ^VIX: global
+features:
+  lookback_days: 30
+  rsi_period: 14
+  atr_period: 14
+  ma_period: 10
+  volume_zscore_window: 60
+  columns:
+  - f1_logret
+  - f2_price_ma
+  - f3_rsi
+  - f4_macd
+  - f5_atr
+  - f6_vol_zscore
+  - f7_market_ret
+  - f8_vix
+graph:
+  corr_window: 60
+  corr_method: pearson
+  k_pos: 8
+  k_neg: 4
+  symmetrise: false
+  include_sector: true
+  min_history_days: 61
+models:
+  ids:
+  - lstm
+  - transformer_nograph
+  - dmrgt_pos_only
+  - dmrgt_no_sector
+  - dmrgt_all3
+training:
+  seeds:
+  - 0
+  - 1
+  - 2
+  - 3
+  - 4
+  batch_size: 32
+  epochs: 50
+  learning_rate: 0.001
+  huber_delta: 1.0
+  early_stopping_patience: 10
+backtest:
+  commission_bps: 10
+  slippage_bps: 5
+  decile_fraction: 0.2
+folds:
+- name: fold_1_2019_calm
+  train_start: '2015-01-01'
+  train_end: '2018-12-31'
+  test_start: '2019-01-01'
+  test_end: '2019-12-31'
+- name: fold_2_2020_covid
+  train_start: '2015-01-01'
+  train_end: '2019-12-31'
+  test_start: '2020-01-01'
+  test_end: '2020-12-31'
+- name: fold_3_2021
+  train_start: '2015-01-01'
+  train_end: '2020-12-31'
+  test_start: '2021-01-01'
+  test_end: '2021-12-31'
+- name: fold_4_2022_rates
+  train_start: '2015-01-01'
+  train_end: '2021-12-31'
+  test_start: '2022-01-01'
+  test_end: '2022-12-31'

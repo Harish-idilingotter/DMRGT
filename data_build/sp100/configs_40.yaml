@@ -1,0 +1,217 @@
+# DMRGT Phase 2 — single source of truth for all hyperparameters, tickers,
+# costs, seeds, fold boundaries, graph parameters, and model identifiers.
+# Every module reads from this file. Nothing in script code may hardcode a
+# value that also lives here.
+
+# ─── Universe ──────────────────────────────────────────────────────────────
+# 40 liquid S&P 100 constituents stratified across the 8 GICS sectors,
+# 5 per sector. Sector diversity matters because Phase 2 adds sector edges
+# and negative-correlation edges, both of which need cross-sector variety
+# to be meaningful.
+#
+# Sector mapping (per GICS):
+#   Information Technology        — AAPL, MSFT, NVDA, AVGO, CRM
+#   Financials                    — JPM, BRK-B, GS, BAC, V
+#   Health Care                   — JNJ, PFE, UNH, ABBV, MRK
+#   Energy                       — XOM, CVX, COP, SLB, EOG
+#   Consumer Discretionary       — AMZN, HD, NKE, TSLA, SBUX
+#   Consumer Staples             — PG, KO, WMT, COST, PEP
+#   Industrials                  — HON, CAT, BA, UPS, UNP
+#   Utilities                    — NEE, DUK, SO, AEP, EXC
+# Plus the two global series (^GSPC, ^VIX) — applied identically to every
+# stock on a given date and used as features 7 and 8.
+universe:
+  tickers:
+    # Information Technology (5)
+    - AAPL
+    - MSFT
+    - NVDA
+    - AVGO
+    - CRM
+    # Financials (5)
+    - JPM
+    - BRK-B
+    - GS
+    - BAC
+    - V
+    # Health Care (5)
+    - JNJ
+    - PFE
+    - UNH
+    - ABBV
+    - MRK
+    # Energy (5)
+    - XOM
+    - CVX
+    - COP
+    - SLB
+    - EOG
+    # Consumer Discretionary (5)
+    - AMZN
+    - HD
+    - NKE
+    - TSLA
+    - SBUX
+    # Consumer Staples (5)
+    - PG
+    - KO
+    - WMT
+    - COST
+    - PEP
+    # Industrials (5)
+    - HON
+    - CAT
+    - BA
+    - UPS
+    - UNP
+    # Utilities (5)
+    - NEE
+    - DUK
+    - SO
+    - AEP
+    - EXC
+  global_series:
+    - ^GSPC      # S&P 500 index — feature 7 (market return)
+    - ^VIX       # Volatility index — feature 8
+  start_date: "2015-01-01"
+  end_date:   "2024-12-31"
+
+# ─── Sectors ───────────────────────────────────────────────────────────────
+# Single source of truth for GICS sector labels. Used by data.py for
+# validation and by graph.py for sector-edge construction. Every universe
+# ticker must appear here; global series are tagged "global".
+sectors:
+  # Information Technology
+  AAPL:  "Information Technology"
+  MSFT:  "Information Technology"
+  NVDA:  "Information Technology"
+  AVGO:  "Information Technology"
+  CRM:   "Information Technology"
+  # Financials
+  JPM:   "Financials"
+  BRK-B: "Financials"
+  GS:    "Financials"
+  BAC:   "Financials"
+  V:     "Financials"
+  # Health Care
+  JNJ:   "Health Care"
+  PFE:   "Health Care"
+  UNH:   "Health Care"
+  ABBV:  "Health Care"
+  MRK:   "Health Care"
+  # Energy
+  XOM:   "Energy"
+  CVX:   "Energy"
+  COP:   "Energy"
+  SLB:   "Energy"
+  EOG:   "Energy"
+  # Consumer Discretionary
+  AMZN:  "Consumer Discretionary"
+  HD:    "Consumer Discretionary"
+  NKE:   "Consumer Discretionary"
+  TSLA:  "Consumer Discretionary"
+  SBUX:  "Consumer Discretionary"
+  # Consumer Staples
+  PG:    "Consumer Staples"
+  KO:    "Consumer Staples"
+  WMT:   "Consumer Staples"
+  COST:  "Consumer Staples"
+  PEP:   "Consumer Staples"
+  # Industrials
+  HON:   "Industrials"
+  CAT:   "Industrials"
+  BA:    "Industrials"
+  UPS:   "Industrials"
+  UNP:   "Industrials"
+  # Utilities
+  NEE:   "Utilities"
+  DUK:   "Utilities"
+  SO:    "Utilities"
+  AEP:   "Utilities"
+  EXC:   "Utilities"
+  # Global series
+  ^GSPC: "global"
+  ^VIX:  "global"
+
+# ─── Features ──────────────────────────────────────────────────────────────
+# Computed locally in features.py. Lookback days determines the temporal
+# input dimension [n_stocks, lookback_days, 8].
+#
+# `columns` is the EXPLICIT list of feature columns that will be loaded
+# by train.assemble_fold(). It must agree with FEATURE_COLUMNS in
+# features.py — never infer the schema by string-matching the parquet
+# columns, because a future rename would silently select nothing.
+features:
+  lookback_days: 30
+  rsi_period: 14
+  atr_period: 14
+  ma_period: 10
+  volume_zscore_window: 60
+  columns: [f1_logret, f2_price_ma, f3_rsi, f4_macd, f5_atr,
+            f6_vol_zscore, f7_market_ret, f8_vix]
+  # f1 log-return, f2 price/10d MA, f3 RSI(14), f4 MACD,
+  # f5 ATR(14), f6 volume z-score, f7 market return, f8 VIX
+
+# ─── Graph ─────────────────────────────────────────────────────────────────
+# Every graph parameter is config-driven, not hardcoded. Phase 4's
+# sensitivity grid varies k_pos, k_neg, and corr_window — hardcoding
+# now means rewriting graph.py in September.
+graph:
+  corr_window: 60           # trailing days of returns per correlation
+  corr_method: pearson      # pearson | spearman
+  k_pos: 8                  # top-k positive edges per stock
+  k_neg: 4                  # bottom-k negative edges per stock
+  symmetrise: false         # directed — preserves top-k selection asymmetry
+  include_sector: true
+  min_history_days: 61      # corr_window + 1 (need 61 prices for 60 returns)
+
+# ─── Models ────────────────────────────────────────────────────────────────
+# Canonical model identifiers — referenced by train.py and the `model`
+# column in predictions.parquet. Never hand-typed elsewhere.
+models:
+  ids: [lstm, transformer_nograph, dmrgt_pos_only, dmrgt_no_sector, dmrgt_all3]
+
+# ─── Training ──────────────────────────────────────────────────────────────
+# 5 seeds, as per §11 of the spec ("Seeds: ≥ 5 per configuration").
+training:
+  seeds: [0, 1, 2, 3, 4]
+  batch_size: 32
+  epochs: 50
+  learning_rate: 0.001
+  huber_delta: 1.0
+  early_stopping_patience: 10
+
+# ─── Backtest / cost model ────────────────────────────────────────────────
+# Costs are active from the very first backtest run (§1.5). Reporting a
+# cost-free number at any point is a violation.
+backtest:
+  commission_bps: 10     # 0.10% per trade
+  slippage_bps: 5        # 0.05%
+  decile_fraction: 0.2   # top/bottom 20% for 40 stocks = 8 each
+
+# ─── Walk-forward folds ───────────────────────────────────────────────────
+# Defined explicitly per §5.1. Train window expands chronologically. The
+# most recent ~15% of each training window is reserved as validation for
+# early stopping (also chronological). The hard constraint asserted in
+# code is max(train_dates) < min(test_dates) on every fold.
+folds:
+  - name: "fold_1_2019_calm"
+    train_start: "2015-01-01"
+    train_end:   "2018-12-31"
+    test_start:  "2019-01-01"
+    test_end:    "2019-12-31"
+  - name: "fold_2_2020_covid"
+    train_start: "2015-01-01"
+    train_end:   "2019-12-31"
+    test_start:  "2020-01-01"
+    test_end:    "2020-12-31"
+  - name: "fold_3_2021"
+    train_start: "2015-01-01"
+    train_end:   "2020-12-31"
+    test_start:  "2021-01-01"
+    test_end:    "2021-12-31"
+  - name: "fold_4_2022_rates"
+    train_start: "2015-01-01"
+    train_end:   "2021-12-31"
+    test_start:  "2022-01-01"
+    test_end:    "2022-12-31"

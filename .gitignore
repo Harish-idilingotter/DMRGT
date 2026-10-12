@@ -93,3 +93,8 @@ kaggle/code_phase3/*
 # ── Logs ──────────────────────────────────────────────────────────────
 *.log
 logs/
+
+# ── S&P 100 data build: venv and large build outputs stay local ──
+data_build/sp100/out_*/
+data_build/sp100/dmrgt-sp100-cache/
+data_build/sp100/build_*.log

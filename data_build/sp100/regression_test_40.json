@@ -1,0 +1,203 @@
+{
+  "verdict": "PASSED via data-revision proof (spec \u00a73: Yahoo revised adjusted prices; code port is bit-exact on the original prices)",
+  "a_port_faithfulness_on_original_prices": {
+    "description": "ported pipeline run on the ORIGINAL dmrgt-phase-3-cache prices.parquet",
+    "passed": true,
+    "features": {
+      "f1_logret": {
+        "pearson": 1.0,
+        "median_abs_diff": 0.0,
+        "col_std": 0.01855136564003924,
+        "max_abs_diff": 0.0,
+        "pass": true
+      },
+      "f2_price_ma": {
+        "pearson": 0.9999999999999999,
+        "median_abs_diff": 0.0,
+        "col_std": 0.030276786022620163,
+        "max_abs_diff": 0.0,
+        "pass": true
+      },
+      "f3_rsi": {
+        "pearson": 1.0,
+        "median_abs_diff": 0.0,
+        "col_std": 12.148368129265128,
+        "max_abs_diff": 0.0,
+        "pass": true
+      },
+      "f4_macd": {
+        "pearson": 0.9999999999999999,
+        "median_abs_diff": 0.0,
+        "col_std": 2.8329697914649574,
+        "max_abs_diff": 0.0,
+        "pass": true
+      },
+      "f5_atr": {
+        "pearson": 1.0,
+        "median_abs_diff": 0.0,
+        "col_std": 0.011500381939464819,
+        "max_abs_diff": 0.0,
+        "pass": true
+      },
+      "f6_vol_zscore": {
+        "pearson": 0.9999999999999998,
+        "median_abs_diff": 0.0,
+        "col_std": 1.066758134781466,
+        "max_abs_diff": 0.0,
+        "pass": true
+      },
+      "f7_market_ret": {
+        "pearson": 1.0,
+        "median_abs_diff": 0.0,
+        "col_std": 0.011320248306084954,
+        "max_abs_diff": 0.0,
+        "pass": true
+      },
+      "f8_vix": {
+        "pearson": 1.0,
+        "median_abs_diff": 0.0,
+        "col_std": 7.355138630948827,
+        "max_abs_diff": 0.0,
+        "pass": true
+      }
+    },
+    "targets": {
+      "pearson": 1.0,
+      "frac_within_1e-6": 1.0,
+      "max_abs_diff": 0.0,
+      "pass": true
+    },
+    "graphs": {
+      "dates_new": 2455,
+      "dates_old": 2455,
+      "dates_common": 2455,
+      "identical_edge_set_dates": 2455,
+      "fraction": 1.0,
+      "pass": true
+    }
+  },
+  "b_fresh_download_vs_original": {
+    "description": "ported pipeline on a fresh yfinance download (2026-10-03)",
+    "strict_criteria_passed": false,
+    "dates_and_tickers": {
+      "prices": {
+        "dates_identical": true,
+        "tickers_identical": true,
+        "rows_new": 105630,
+        "rows_old": 105630
+      },
+      "features": {
+        "dates_identical": true,
+        "tickers_identical": true,
+        "rows_new": 98240,
+        "rows_old": 98240
+      },
+      "targets": {
+        "dates_identical": true,
+        "tickers_identical": true,
+        "rows_new": 100560,
+        "rows_old": 100560
+      }
+    },
+    "features": {
+      "f1_logret": {
+        "pearson": 0.9999999999126924,
+        "median_abs_diff": 1.353408131186777e-07,
+        "col_std": 0.01855136564003924,
+        "max_abs_diff": 1.573134999532759e-06,
+        "pass": false
+      },
+      "f2_price_ma": {
+        "pearson": 0.9999999999851307,
+        "median_abs_diff": 9.20673179916065e-08,
+        "col_std": 0.030276786022620163,
+        "max_abs_diff": 1.0585939351770435e-06,
+        "pass": false
+      },
+      "f3_rsi": {
+        "pearson": 0.9999999999656121,
+        "median_abs_diff": 3.9231233920133946e-05,
+        "col_std": 12.148368129265128,
+        "max_abs_diff": 0.001294933933621678,
+        "pass": false
+      },
+      "f4_macd": {
+        "pearson": 0.9999947075997743,
+        "median_abs_diff": 0.0011338375829881286,
+        "col_std": 2.8329697914649574,
+        "max_abs_diff": 0.15097553293119859,
+        "pass": false
+      },
+      "f5_atr": {
+        "pearson": 0.9999999999973787,
+        "median_abs_diff": 1.3383349081741436e-08,
+        "col_std": 0.011500381939464819,
+        "max_abs_diff": 2.0457006420782076e-07,
+        "pass": false
+      },
+      "f6_vol_zscore": {
+        "pearson": 0.9999999999999998,
+        "median_abs_diff": 0.0,
+        "col_std": 1.066758134781466,
+        "max_abs_diff": 0.0,
+        "pass": true
+      },
+      "f7_market_ret": {
+        "pearson": 1.0,
+        "median_abs_diff": 0.0,
+        "col_std": 0.011320248306084954,
+        "max_abs_diff": 0.0,
+        "pass": true
+      },
+      "f8_vix": {
+        "pearson": 1.0,
+        "median_abs_diff": 0.0,
+        "col_std": 7.355138630948827,
+        "max_abs_diff": 0.0,
+        "pass": true
+      }
+    },
+    "targets": {
+      "pearson": 0.9999999998652206,
+      "frac_within_1e-6": 0.9990950676213206,
+      "max_abs_diff": 1.6180644676509412e-06,
+      "pass": true
+    },
+    "graphs": {
+      "dates_new": 2455,
+      "dates_old": 2455,
+      "dates_common": 2455,
+      "identical_edge_set_dates": 2441,
+      "fraction": 0.9942973523421589,
+      "pass": true
+    },
+    "prices_revision_vs_original": {
+      "open": {
+        "max_rel_diff": 0.015694588284664593,
+        "median_rel_diff": 0.0026899009837824976,
+        "frac_rows_changed": 0.814910536779324
+      },
+      "high": {
+        "max_rel_diff": 0.015694588284664693,
+        "median_rel_diff": 0.0026899009837824507,
+        "frac_rows_changed": 0.814910536779324
+      },
+      "low": {
+        "max_rel_diff": 0.0156945882846646,
+        "median_rel_diff": 0.0026899009837823553,
+        "frac_rows_changed": 0.814910536779324
+      },
+      "close": {
+        "max_rel_diff": 0.015694588284664635,
+        "median_rel_diff": 0.0026899009837823553,
+        "frac_rows_changed": 0.814910536779324
+      },
+      "volume": {
+        "max_rel_diff": 0.0,
+        "median_rel_diff": 0.0,
+        "frac_rows_changed": 0.0
+      }
+    },
+    "note": "Strict feature criterion (median abs diff <= 1e-6 x column std) fails for f1-f5 because Yahoo's dividend-adjusted OHLC changed (max 1.6% relative, median 0.27%); volume, f6-f8 identical. Pearson >= 0.999995 for every feature; targets and graphs pass their criteria."
+  }
+}
